@@ -280,18 +280,55 @@ func testArchive(ctx context.Context, step func(string, func() error) error, c *
 }
 
 func parseRangeStart(d []byte, typ int) (time.Time, error) {
-	if len(d) < 3 {
+	// REG 0x3FF6 returns VT_DATA_RAP records, i.e. 4 bytes each:
+	// day, month, year, hour.  The response is:
+	//   [0:4]  start of hourly archive
+	//   [4:8]  current date/time
+	//   [8:12] start of daily archive (firmware >= 1.7)
+	// The previous implementation discarded the hour and always used the
+	// first record.  On the tested meter the response is
+	//   07 09 1A 0B | 16 09 1A 0D | 07 09 1A 17
+	// which means 2026-09-07 11:00 is the first hourly record.  Starting at
+	// 2026-09-07 00:00 therefore causes exception 3 (no record) and makes
+	// vkt7check report a false failure.
+	if len(d) < 4 {
 		return time.Time{}, fmt.Errorf("invalid range response: %x", d)
 	}
-	y, m, day := 2000+int(d[2]), time.Month(d[1]), int(d[0])
-	if m < 1 || m > 12 || day < 1 || day > 31 {
-		return time.Time{}, fmt.Errorf("invalid range date: %x", d[:3])
+
+	off := 0
+	switch typ {
+	case protocol.Hourly:
+		off = 0
+	case protocol.Daily:
+		if len(d) < 12 {
+			return time.Time{}, fmt.Errorf("invalid daily range response: %x", d)
+		}
+		off = 8
+	case protocol.Monthly, protocol.Total:
+		// REG 0x3FF6 does not expose a monthly/total start directly.
+		// Use the beginning of the daily archive as a safe lower bound;
+		// callers must still tolerate exception 3 for dates with no record.
+		if len(d) < 12 {
+			return time.Time{}, fmt.Errorf("invalid archive range response: %x", d)
+		}
+		off = 8
+	default:
+		return time.Time{}, fmt.Errorf("unsupported archive type %d", typ)
 	}
-	t := time.Date(y, m, day, 0, 0, 0, 0, time.Local)
-	if typ == protocol.Monthly || typ == protocol.Total {
-		t = time.Date(y, m, 1, 23, 0, 0, 0, time.Local)
+
+	day := int(d[off])
+	m := time.Month(d[off+1])
+	y := 2000 + int(d[off+2])
+	hour := int(d[off+3])
+	if m < 1 || m > 12 || day < 1 || day > 31 || hour > 23 {
+		return time.Time{}, fmt.Errorf("invalid range date/time: %x", d[off:off+4])
 	}
-	return t, nil
+
+	// Daily/monthly/total archive requests require hour=23.
+	if typ == protocol.Daily || typ == protocol.Monthly || typ == protocol.Total {
+		hour = 23
+	}
+	return time.Date(y, m, day, hour, 0, 0, 0, time.Local), nil
 }
 
 func filter(es []model.Element, typ int) []model.Element {
