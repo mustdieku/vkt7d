@@ -317,24 +317,44 @@ func (c *Client) ActiveElements() ([]model.Element, error) {
 	if e != nil {
 		return nil, e
 	}
+
 	d := dataPart(r)
+
 	if c.Debug && c.Log != nil {
-		c.Log.Debug("vkt7 active-elements response", "raw", fmt.Sprintf("%X", r), "data", fmt.Sprintf("%X", d), "data_len", len(d))
+		c.Log.Debug(
+			"vkt7 active-elements response",
+			"raw", fmt.Sprintf("%X", r),
+			"data", fmt.Sprintf("%X", d),
+			"data_len", len(d),
+		)
 	}
+
 	if ex := parseException(r); ex != nil {
 		return nil, ex
 	}
+
 	var es []model.Element
+
 	for i := 0; i+6 <= len(d); i += 6 {
-		a := int(binary.LittleEndian.Uint32(d[i : i+4]))
+		// VKT-7 returns the active-element address with
+		// bit 30 set (0x40000000). The actual element number
+		// is contained in the lower bits.
+		a := int(binary.LittleEndian.Uint32(d[i:i+4]) & 0x3FFFFFFF)
 		sz := int(binary.LittleEndian.Uint16(d[i+4 : i+6]))
+
 		if a < 83 {
-			es = append(es, model.Element{Address: a, Name: ElementName(a), Size: sz})
+			es = append(es, model.Element{
+				Address: a,
+				Name:    ElementName(a),
+				Size:    sz,
+			})
 		}
 	}
+
 	if c.Debug && c.Log != nil {
 		c.Log.Debug("vkt7 active-elements parsed", "count", len(es))
 	}
+
 	return es, nil
 }
 func makeReadListPayload(es []model.Element) ([]byte, error) {
