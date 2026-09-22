@@ -22,6 +22,7 @@ type Config struct {
 	Timeout      time.Duration
 	Migrate      bool
 	Verbose      bool
+	DebugSerial  bool
 }
 
 func Load() Config {
@@ -40,7 +41,11 @@ func Load() Config {
 	flag.DurationVar(&c.Timeout, "timeout", envDuration("VKT7_TIMEOUT", 8*time.Second), "serial operation timeout")
 	flag.BoolVar(&c.Migrate, "migrate", false, "apply embedded schema")
 	flag.BoolVar(&c.Verbose, "verbose", false, "verbose logging")
+	flag.BoolVar(&c.DebugSerial, "debug-serial", false, "log raw VKT-7 TX/RX frames (implies verbose)")
 	flag.Parse()
+	if c.DebugSerial {
+		c.Verbose = true
+	}
 	return c
 }
 func env(k, d string) string {

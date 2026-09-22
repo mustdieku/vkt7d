@@ -44,6 +44,7 @@ type Client struct {
 	Address byte
 	Timeout time.Duration
 	Log     *slog.Logger
+	Debug   bool
 }
 
 func CRC16(b []byte) uint16 {
@@ -85,7 +86,11 @@ func (c *Client) tx(req []byte) ([]byte, error) {
 		return nil, fmt.Errorf("reset serial input buffer: %w", err)
 	}
 
-	if _, e := c.Port.Write(append([]byte{0xff, 0xff}, req...)); e != nil {
+	txFrame := append([]byte{0xff, 0xff}, req...)
+	if c.Debug && c.Log != nil {
+		c.Log.Debug("vkt7 TX", "frame", fmt.Sprintf("%X", txFrame), "len", len(txFrame), "function", fmt.Sprintf("0x%02X", req[1]))
+	}
+	if _, e := c.Port.Write(txFrame); e != nil {
 		return nil, e
 	}
 
@@ -158,10 +163,19 @@ func (c *Client) tx(req []byte) ([]byte, error) {
 			}
 			csum := CRC16(out[:expected-2])
 			if out[expected-2] == byte(csum) && out[expected-1] == byte(csum>>8) {
+				if c.Debug && c.Log != nil {
+					c.Log.Debug("vkt7 RX", "frame", fmt.Sprintf("%X", out), "len", len(out), "function", fmt.Sprintf("0x%02X", out[1]), "data_len", expected-5)
+				}
 				return out, nil
+			}
+			if c.Debug && c.Log != nil {
+				c.Log.Debug("vkt7 RX CRC ERROR", "frame", fmt.Sprintf("%X", out), "len", len(out))
 			}
 			return nil, fmt.Errorf("CRC error in VKT-7 response: %X", out)
 		}
+	}
+	if c.Debug && c.Log != nil {
+		c.Log.Debug("vkt7 RX TIMEOUT", "partial", fmt.Sprintf("%X", out), "len", len(out))
 	}
 	return nil, fmt.Errorf("timeout waiting for VKT-7 response; tx=%s rx=%s", hex.EncodeToString(req), hex.EncodeToString(out))
 }
@@ -304,6 +318,9 @@ func (c *Client) ActiveElements() ([]model.Element, error) {
 		return nil, e
 	}
 	d := dataPart(r)
+	if c.Debug && c.Log != nil {
+		c.Log.Debug("vkt7 active-elements response", "raw", fmt.Sprintf("%X", r), "data", fmt.Sprintf("%X", d), "data_len", len(d))
+	}
 	if ex := parseException(r); ex != nil {
 		return nil, ex
 	}
@@ -314,6 +331,9 @@ func (c *Client) ActiveElements() ([]model.Element, error) {
 		if a < 83 {
 			es = append(es, model.Element{Address: a, Name: ElementName(a), Size: sz})
 		}
+	}
+	if c.Debug && c.Log != nil {
+		c.Log.Debug("vkt7 active-elements parsed", "count", len(es))
 	}
 	return es, nil
 }
@@ -357,7 +377,11 @@ func (c *Client) ReadData() ([]byte, error) {
 	if ex := parseException(r); ex != nil {
 		return nil, ex
 	}
-	return dataPart(r), nil
+	d := dataPart(r)
+	if c.Debug && c.Log != nil {
+		c.Log.Debug("vkt7 read-data", "raw", fmt.Sprintf("%X", r), "data", fmt.Sprintf("%X", d), "data_len", len(d))
+	}
+	return d, nil
 }
 func ElementName(a int) string {
 	names := []string{"t1_1", "t2_1", "t3_1", "V1_1", "V2_1", "V3_1", "M1_1", "M2_1", "M3_1", "P1_1", "P2_1", "Mg_1", "Qo_1", "Qg_1", "dt_1", "tx", "ta", "BNP_1", "VOC_1", "G1_1", "G2_1", "G3_1", "t1_2", "t2_2", "t3_2", "V1_2", "V2_2", "V3_2", "M1_2", "M2_2", "M3_2", "P1_2", "P2_2", "Mg_2", "Qo_2", "Qg_2", "dt_2", "reserved_37", "reserved_38", "BNP_2", "VOC_2", "G1_2", "G2_2", "G3_2", "t_unit", "G_unit", "V_unit", "M_unit", "P_unit", "dt_unit", "tx_unit", "ta_unit", "Mg_unit", "Qo_unit", "Qg_unit", "BNP_unit", "VOC_unit", "t_dec", "G_dec_reserved", "V1_dec", "M1_dec", "P_dec", "dt_dec", "tx_dec", "ta_dec", "Mg_dec", "Qo1_dec", "t2_dec_reserved", "G2_dec_reserved", "V2_dec", "M2_dec", "P2_dec", "dt2_dec", "tx2_dec", "ta2_dec", "Mg2_dec", "Qo2_dec", "NS_1", "NS_2", "QntNS_1", "QntNS_2", "DI", "P3"}

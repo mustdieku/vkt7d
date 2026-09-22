@@ -31,7 +31,7 @@ func Run(ctx context.Context, cfg config.Config, log *slog.Logger, st *storage.S
 		return fmt.Errorf("open serial %s: %w", cfg.Port, err)
 	}
 	defer port.Close()
-	c := &protocol.Client{Port: port, Address: byte(cfg.Address), Timeout: cfg.Timeout, Log: log}
+	c := &protocol.Client{Port: port, Address: byte(cfg.Address), Timeout: cfg.Timeout, Log: log, Debug: cfg.DebugSerial}
 
 	step := func(name string, fn func() error) error {
 		fmt.Printf("[TEST] %-28s ... ", name)
