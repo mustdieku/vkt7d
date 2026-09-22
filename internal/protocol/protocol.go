@@ -274,8 +274,23 @@ func dataPart(r []byte) []byte {
 	}
 	return nil
 }
+
+// ErrArchiveDateMissing is returned when the VKT-7 explicitly reports
+// exception code 3 for the requested archive date.
+//
+// This is not a transport/protocol failure. The protocol documentation
+// defines exception 3 as "no data in the archive for the specified date".
+var ErrArchiveDateMissing = errors.New("VKT-7 archive date has no data")
+
+func IsArchiveDateMissing(err error) bool {
+	return errors.Is(err, ErrArchiveDateMissing)
+}
+
 func parseException(r []byte) error {
 	if len(r) >= 3 && r[1]&0x80 != 0 {
+		if r[2] == 3 {
+			return fmt.Errorf("%w: exception code=3", ErrArchiveDateMissing)
+		}
 		return fmt.Errorf("VKT-7 exception code=%d", r[2])
 	}
 	return nil

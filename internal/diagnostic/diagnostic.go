@@ -255,28 +255,37 @@ func testArchive(ctx context.Context, step func(string, func() error) error, c *
 	}
 	for i := 0; i < maxRecords && !start.After(now); i++ {
 		t := start
-		err := step(fmt.Sprintf("%s record %s", name, t.Format("2006-01-02 15:04")), func() error {
-			v, err := c.ReadArchiveRecord(typ, t, es)
-			if err == nil {
-				printValues(v)
-			}
-			return err
-		})
+		label := fmt.Sprintf("%s record %s", name, t.Format("2006-01-02 15:04"))
+		fmt.Printf("[TEST] %-28s ... ", label)
+		started := time.Now()
+		v, err := c.ReadArchiveRecord(typ, t, es)
+		if protocol.IsArchiveDateMissing(err) {
+			fmt.Printf("SKIP (%s): archive record is absent\n", time.Since(started).Round(time.Millisecond))
+			start = nextArchive(t, typ)
+			continue
+		}
 		if err != nil {
-			return err
+			fmt.Printf("FAIL (%s): %v\n", time.Since(started).Round(time.Millisecond), err)
+			return fmt.Errorf("%s: %w", label, err)
 		}
-		if typ == protocol.Hourly {
-			start = start.Add(time.Hour)
-		} else {
-			start = start.AddDate(0, 0, 1)
-		}
-		if typ == protocol.Monthly || typ == protocol.Total {
-			start = start.AddDate(0, 1, 0)
-			start = start.AddDate(0, 0, -1)
-		}
-		_ = ctx
+		printValues(v)
+		fmt.Printf("OK (%s)\n", time.Since(started).Round(time.Millisecond))
+		start = nextArchive(t, typ)
 	}
+	_ = ctx
 	return nil
+}
+
+func nextArchive(t time.Time, typ int) time.Time {
+	if typ == protocol.Hourly {
+		return t.Add(time.Hour)
+	}
+	if typ == protocol.Monthly || typ == protocol.Total {
+		// Monthly/total requests use hour=23. Move to the next month
+		// while preserving the convention expected by SetDate().
+		return time.Date(t.Year(), t.Month()+1, 1, 23, 0, 0, 0, t.Location())
+	}
+	return t.AddDate(0, 0, 1)
 }
 
 func parseRangeStart(d []byte, typ int) (time.Time, error) {

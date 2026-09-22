@@ -150,6 +150,14 @@ func (x *Collector) collectArchive(ctx context.Context, c *protocol.Client, id i
 		}
 		v, e := c.ReadArchiveRecord(typ, start, es)
 		if e != nil {
+			if protocol.IsArchiveDateMissing(e) {
+				// Exception 3 is a normal sparse-archive condition:
+				// the requested timestamp/date has no record. Do not
+				// stall the daemon forever on that timestamp.
+				x.Log.Info("archive date absent", "type", typ, "date", start)
+				start = next(start, typ)
+				continue
+			}
 			x.Log.Warn("archive read", "type", typ, "date", start, "error", e)
 			return
 		}
