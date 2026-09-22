@@ -1,0 +1,21 @@
+[Unit]
+Description=VKT-7 archive collector
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=vkt7
+Group=dialout
+EnvironmentFile=-/etc/vkt7d/vkt7d.env
+ExecStart=/usr/local/bin/vkt7d --port=${VKT7_PORT} --baud=${VKT7_BAUD} --address=${VKT7_ADDRESS} --db-url=${VKT7_DB_URL} --device-name=${VKT7_DEVICE_NAME} --interval=${VKT7_INTERVAL}
+Restart=always
+RestartSec=30
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/vkt7d
+
+[Install]
+WantedBy=multi-user.target
