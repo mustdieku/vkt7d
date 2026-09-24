@@ -180,7 +180,7 @@ func (x *Collector) collectArchive(ctx context.Context, c *protocol.Client, id i
 		if typ == protocol.Hourly {
 			start = start.Add(time.Hour)
 		} else {
-+			start = advance(start, typ)
+			start = next(start, typ)
 		}
 	}
 }
@@ -244,7 +244,13 @@ func next(t time.Time, typ int) time.Time {
 	case protocol.Hourly:
 		return t.Add(time.Hour)
 	case protocol.Monthly, protocol.Total:
-		return t.AddDate(0, 1, 0)
+		return time.Date(
+			t.Year(),
+			t.Month()+1,
+			1,
+			0, 0, 0, 0,
+			t.Location(),
+		)
 	default:
 		return t.AddDate(0, 0, 1)
 	}

@@ -152,18 +152,37 @@ func (s *Store) SaveCurrent(ctx context.Context, table string, id int64, v map[s
 }
 func (s *Store) Last(ctx context.Context, table string, id int64) (*time.Time, error) {
 	var t time.Time
-	var e error
-	if table == "hourly_archive" {
-		e = s.Pool.QueryRow(ctx, `SELECT archive_time FROM vkt7.hourly_archive WHERE device_id=$1 ORDER BY archive_time DESC LIMIT 1`, id).Scan(&t)
-	} else {
-		e = s.Pool.QueryRow(ctx, fmt.Sprintf(`SELECT archive_date::timestamp FROM vkt7.%s WHERE device_id=$1 ORDER BY archive_date DESC LIMIT 1`, table), id).Scan(&t)
+	var err error
+
+	switch table {
+	case "hourly_archive":
+		err = s.Pool.QueryRow(ctx, `
+			SELECT archive_time
+			FROM vkt7.hourly_archive
+			WHERE device_id=$1
+			ORDER BY archive_time DESC
+			LIMIT 1`, id).Scan(&t)
+
+	case "daily_archive", "monthly_archive", "total_archive":
+		err = s.Pool.QueryRow(ctx, fmt.Sprintf(`
+			SELECT archive_date::timestamp
+			FROM vkt7.%s
+			WHERE device_id=$1
+			ORDER BY archive_date DESC
+			LIMIT 1`, table), id).Scan(&t)
+
+	default:
+		return nil, fmt.Errorf("bad archive table %q", table)
 	}
-	if errors.Is(e, pgx.ErrNoRows) {
+
+	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
-	if e != nil {
-		return nil, e
+
+	if err != nil {
+		return nil, err
 	}
+
 	return &t, nil
 }
 func (s *Store) CurrentLast(ctx context.Context, table string, id int64) (*time.Time, error) {
