@@ -243,7 +243,6 @@ func testArchive(ctx context.Context, step func(string, func() error) error, c *
 				} else {
 					start = start.AddDate(0, 0, 1)
 				}
-				continue
 			}
 			return err
 		}
