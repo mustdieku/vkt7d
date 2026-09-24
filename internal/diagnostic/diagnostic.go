@@ -232,6 +232,19 @@ func testArchive(ctx context.Context, step func(string, func() error) error, c *
 		}
 		r, err := c.ReadRange()
 		if err != nil {
+			if protocol.IsExceptionCode(err, 3) {
+				// 0x3FF6 is a lower bound. If the exact endpoint is absent,
+				// advance to the next archive period rather than reporting a
+				// false end-to-end failure.
+				if typ == protocol.Hourly {
+					start = start.Add(time.Hour)
+				} else if typ == protocol.Monthly || typ == protocol.Total {
+					start = start.AddDate(0, 1, 0)
+				} else {
+					start = start.AddDate(0, 0, 1)
+				}
+				continue
+			}
 			return err
 		}
 		var e error

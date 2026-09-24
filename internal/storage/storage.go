@@ -5,7 +5,9 @@ import (
 	"embed"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"time"
 	"vkt7d/internal/model"
@@ -48,6 +50,9 @@ func (s *Store) UpsertActive(ctx context.Context, id int64, es []model.Element) 
 		return e
 	}
 	defer tx.Rollback(ctx)
+	if _, e = tx.Exec(ctx, `DELETE FROM vkt7.active_elements WHERE device_id=$1`, id); e != nil {
+		return e
+	}
 	for _, x := range es {
 		if _, e = tx.Exec(ctx, `INSERT INTO vkt7.active_elements(device_id,element_address,element_size) VALUES($1,$2,$3) ON CONFLICT(device_id,element_address) DO UPDATE SET element_size=excluded.element_size,last_seen_at=now()`, id, x.Address, x.Size); e != nil {
 			return e
@@ -86,6 +91,60 @@ func (s *Store) SaveArchive(ctx context.Context, table string, id int64, t time.
 	_, e := s.Pool.Exec(ctx, sql, id, t, vals, q, ns, raw)
 	return e
 }
+func (s *Store) SaveProperties(ctx context.Context, id int64, v map[string]model.Value) error {
+	tx, err := s.Pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	for name, x := range v {
+		addr := propertyAddress(name)
+		if addr < 0 {
+			return fmt.Errorf("unknown VKT-7 property %q", name)
+		}
+		var numeric any
+		switch n := x.Value.(type) {
+		case int64:
+			numeric = float64(n)
+		case int:
+			numeric = float64(n)
+		case float32:
+			numeric = float64(n)
+		case float64:
+			numeric = n
+		}
+		_, err = tx.Exec(ctx, `INSERT INTO vkt7.properties(device_id,element_address,name,value_text,numeric_value,raw)
+			VALUES($1,$2,$3,$4,$5,$6)
+			ON CONFLICT(device_id,element_address) DO UPDATE SET
+			name=excluded.name,value_text=excluded.value_text,numeric_value=excluded.numeric_value,raw=excluded.raw,updated_at=now()`,
+			id, addr, name, fmt.Sprint(x.Value), numeric, x.Raw)
+		if err != nil {
+			return err
+		}
+	}
+	return tx.Commit(ctx)
+}
+func propertyAddress(name string) int {
+	switch name {
+	case "t_unit": return 44
+	case "G_unit": return 45
+	case "V_unit": return 46
+	case "M_unit": return 47
+	case "P_unit": return 48
+	case "Qo_unit": return 53
+	case "BNP_unit": return 55
+	case "VOC_unit": return 56
+	case "t_dec": return 57
+	case "V1_dec": return 59
+	case "M1_dec": return 60
+	case "P1_dec": return 61
+	case "Qo1_dec": return 66
+	case "V2_dec": return 69
+	case "M2_dec": return 70
+	case "Qo2_dec": return 76
+	default: return -1
+	}
+}
 func (s *Store) SaveCurrent(ctx context.Context, table string, id int64, v map[string]model.Value) error {
 	vals, q, ns, raw := encode(v)
 	_, e := s.Pool.Exec(ctx, fmt.Sprintf(`INSERT INTO vkt7.%s(device_id,"values",quality,ns,raw) VALUES($1,$2,$3,$4,$5)`, table), id, vals, q, ns, raw)
@@ -99,16 +158,22 @@ func (s *Store) Last(ctx context.Context, table string, id int64) (*time.Time, e
 	} else {
 		e = s.Pool.QueryRow(ctx, fmt.Sprintf(`SELECT archive_date::timestamp FROM vkt7.%s WHERE device_id=$1 ORDER BY archive_date DESC LIMIT 1`, table), id).Scan(&t)
 	}
-	if e != nil {
+	if errors.Is(e, pgx.ErrNoRows) {
 		return nil, nil
+	}
+	if e != nil {
+		return nil, e
 	}
 	return &t, nil
 }
 func (s *Store) CurrentLast(ctx context.Context, table string, id int64) (*time.Time, error) {
 	var t time.Time
 	e := s.Pool.QueryRow(ctx, fmt.Sprintf(`SELECT received_at FROM vkt7.%s WHERE device_id=$1 ORDER BY received_at DESC LIMIT 1`, table), id).Scan(&t)
-	if e != nil {
+	if errors.Is(e, pgx.ErrNoRows) {
 		return nil, nil
+	}
+	if e != nil {
+		return nil, e
 	}
 	return &t, nil
 }

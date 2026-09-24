@@ -258,9 +258,6 @@ func dataPart(r []byte) []byte {
 	if r[1]&0x80 != 0 {
 		return r
 	}
-	if len(r) < 5 {
-		return nil
-	}
 	n := int(r[2])
 	// A normal 0x03 response has an explicit byte-count. In particular,
 	// byte-count == 0 is valid and must produce an empty data section rather
@@ -274,6 +271,25 @@ func dataPart(r []byte) []byte {
 	}
 	return nil
 }
+
+// ExceptionError represents a VKT-7 protocol exception response.
+// Code 3 means that the requested archive timestamp/date is absent.
+// Code 5 means that the measurement scheme changed and the active/read list
+// must be refreshed before retrying the same archive record.
+type ExceptionError struct {
+	Code     byte
+	Function byte
+}
+
+func (e *ExceptionError) Error() string {
+	return fmt.Sprintf("VKT-7 exception code=%d", e.Code)
+}
+
+func IsExceptionCode(err error, code byte) bool {
+	var ex *ExceptionError
+	return errors.As(err, &ex) && ex.Code == code
+}
+
 
 // ErrArchiveDateMissing is returned when the VKT-7 explicitly reports
 // exception code 3 for the requested archive date.
@@ -291,7 +307,7 @@ func parseException(r []byte) error {
 		if r[2] == 3 {
 			return fmt.Errorf("%w: exception code=3", ErrArchiveDateMissing)
 		}
-		return fmt.Errorf("VKT-7 exception code=%d", r[2])
+		return &ExceptionError{Code: r[2], Function: r[1] & 0x7f}
 	}
 	return nil
 }
@@ -346,6 +362,10 @@ func (c *Client) ActiveElements() ([]model.Element, error) {
 
 	if ex := parseException(r); ex != nil {
 		return nil, ex
+	}
+
+	if len(d)%6 != 0 {
+		return nil, fmt.Errorf("invalid active-elements data length: %d (raw=%X)", len(d), d)
 	}
 
 	var es []model.Element
@@ -417,6 +437,28 @@ func (c *Client) ReadData() ([]byte, error) {
 		c.Log.Debug("vkt7 read-data", "raw", fmt.Sprintf("%X", r), "data", fmt.Sprintf("%X", d), "data_len", len(d))
 	}
 	return d, nil
+}
+
+// PrepareArchive performs the type/read-list part of the archive protocol.
+// It is separate from ReadArchiveData so sequential records do not repeat
+// two write operations for every timestamp.
+func (c *Client) PrepareArchive(typ int, es []model.Element) error {
+	if err := c.SetType(byte(typ)); err != nil {
+		return err
+	}
+	return c.SetReadList(es)
+}
+
+// ReadArchiveData reads one record after PrepareArchive has been called.
+func (c *Client) ReadArchiveData(typ int, when time.Time, es []model.Element) (map[string]model.Value, error) {
+	if err := c.SetDate(when, typ == Daily || typ == Monthly || typ == Total); err != nil {
+		return nil, err
+	}
+	d, err := c.ReadData()
+	if err != nil {
+		return nil, err
+	}
+	return ParseElements(es, d, typ)
 }
 func ElementName(a int) string {
 	names := []string{"t1_1", "t2_1", "t3_1", "V1_1", "V2_1", "V3_1", "M1_1", "M2_1", "M3_1", "P1_1", "P2_1", "Mg_1", "Qo_1", "Qg_1", "dt_1", "tx", "ta", "BNP_1", "VOC_1", "G1_1", "G2_1", "G3_1", "t1_2", "t2_2", "t3_2", "V1_2", "V2_2", "V3_2", "M1_2", "M2_2", "M3_2", "P1_2", "P2_2", "Mg_2", "Qo_2", "Qg_2", "dt_2", "reserved_37", "reserved_38", "BNP_2", "VOC_2", "G1_2", "G2_2", "G3_2", "t_unit", "G_unit", "V_unit", "M_unit", "P_unit", "dt_unit", "tx_unit", "ta_unit", "Mg_unit", "Qo_unit", "Qg_unit", "BNP_unit", "VOC_unit", "t_dec", "G_dec_reserved", "V1_dec", "M1_dec", "P_dec", "dt_dec", "tx_dec", "ta_dec", "Mg_dec", "Qo1_dec", "t2_dec_reserved", "G2_dec_reserved", "V2_dec", "M2_dec", "P2_dec", "dt2_dec", "tx2_dec", "ta2_dec", "Mg2_dec", "Qo2_dec", "NS_1", "NS_2", "QntNS_1", "QntNS_2", "DI", "P3"}
@@ -567,15 +609,7 @@ func (c *Client) ReadArchiveRecord(typ int, when time.Time, es []model.Element) 
 	if e := c.SetReadList(es); e != nil {
 		return nil, e
 	}
-	daily := typ == Daily || typ == Monthly || typ == Total
-	if e := c.SetDate(when, daily); e != nil {
-		return nil, e
-	}
-	d, e := c.ReadData()
-	if e != nil {
-		return nil, e
-	}
-	return ParseElements(es, d, typ)
+	return c.ReadArchiveData(typ, when, es)
 }
 func (c *Client) ReadCurrent(typ int, es []model.Element) (map[string]model.Value, error) {
 	if e := c.SetType(byte(typ)); e != nil {

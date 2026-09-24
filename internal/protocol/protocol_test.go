@@ -1,6 +1,7 @@
 package protocol
 
 import (
+	"errors"
 	"encoding/binary"
 	"encoding/hex"
 	"testing"
@@ -38,6 +39,17 @@ func TestReadListPayloadIncludesByteCount(t *testing.T) {
 	}
 	if got := binary.LittleEndian.Uint16(p[5:7]); got != 7 {
 		t.Fatalf("first element size = %d, want 7", got)
+	}
+}
+
+func TestExceptionError(t *testing.T) {
+	err := parseException([]byte{0x07, 0x90, 0x03, 0x00, 0x00, 0x00})
+	if !IsExceptionCode(err, 3) {
+		t.Fatalf("expected exception code 3, got %v", err)
+	}
+	var ex *ExceptionError
+	if !errors.As(err, &ex) || ex.Function != 0x10 {
+		t.Fatalf("unexpected exception: %#v", err)
 	}
 }
 

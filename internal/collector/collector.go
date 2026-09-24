@@ -85,7 +85,6 @@ func (x *Collector) once(ctx context.Context) {
 	} else {
 		x.Log.Warn("current totals", "error", e)
 	}
-	_ = x.Store.Touch(ctx, id, 0, 0, 0, 0, 0, 0, 0, 0)
 }
 func filter(es []model.Element, typ int) []model.Element {
 	var out []model.Element
@@ -109,9 +108,17 @@ func meaningful(a, typ int) bool {
 	}
 	return false
 }
+
 func (x *Collector) collectArchive(ctx context.Context, c *protocol.Client, id int64, active []model.Element, typ int, table string, step time.Duration, batch int) {
 	es := filter(active, typ)
 	if len(es) == 0 {
+		return
+	}
+	// The type and read list are constant for the sequential read below.
+	// The protocol explicitly permits the first three archive operations to
+	// be performed once for a cyclic read.
+	if e := c.PrepareArchive(typ, es); e != nil {
+		x.Log.Warn("prepare archive", "table", table, "error", e)
 		return
 	}
 	last, e := x.Store.Last(ctx, table, id)
@@ -148,18 +155,22 @@ func (x *Collector) collectArchive(ctx context.Context, c *protocol.Client, id i
 		if !due(start, typ, time.Now()) {
 			break
 		}
-		v, e := c.ReadArchiveRecord(typ, start, es)
+		v, fresh, e := x.readArchiveRecord(c, typ, start, es, active)
 		if e != nil {
-			if protocol.IsArchiveDateMissing(e) {
-				// Exception 3 is a normal sparse-archive condition:
-				// the requested timestamp/date has no record. Do not
-				// stall the daemon forever on that timestamp.
-				x.Log.Info("archive date absent", "type", typ, "date", start)
-				start = next(start, typ)
+			if protocol.IsExceptionCode(e, 3) {
+				// 0x3FF6 gives an archive lower bound. Some devices can still
+				// return code 3 for that exact timestamp (rollover/incomplete
+				// first record). Do not permanently block collection on it.
+				start = advance(start, typ)
+				i--
 				continue
 			}
 			x.Log.Warn("archive read", "type", typ, "date", start, "error", e)
 			return
+		}
+		if len(fresh) > 0 {
+			active = fresh
+			es = filter(active, typ)
 		}
 		if e = x.Store.SaveArchive(ctx, table, id, start, v); e != nil {
 			x.Log.Error("save archive", "table", table, "error", e)
@@ -169,14 +180,50 @@ func (x *Collector) collectArchive(ctx context.Context, c *protocol.Client, id i
 		if typ == protocol.Hourly {
 			start = start.Add(time.Hour)
 		} else {
-			start = start.AddDate(0, 0, 1)
-			if typ == protocol.Monthly || typ == protocol.Total {
-				start = start.AddDate(0, 1, 0)
-				start = start.AddDate(0, 0, -1)
-			}
++			start = advance(start, typ)
 		}
 	}
 }
+
+func (x *Collector) readArchiveRecord(c *protocol.Client, typ int, when time.Time, es []model.Element, active []model.Element) (map[string]model.Value, []model.Element, error) {
+	for attempt := 0; attempt < 2; attempt++ {
+		v, err := c.ReadArchiveData(typ, when, es)
+		if err == nil {
+			return v, active, nil
+		}
+		if !protocol.IsExceptionCode(err, 5) {
+			return nil, active, err
+		}
+
+		// The record belongs to another measurement scheme. VKT-7 requires
+		// refreshing the active list and rebuilding the read list.
+		fresh, err := c.ActiveElements()
+		if err != nil {
+			return nil, active, err
+		}
+		es = filter(fresh, typ)
+		if len(es) == 0 {
+			return nil, active, fmt.Errorf("no active elements for archive type %d after scheme change", typ)
+		}
+		if err = c.SetReadList(es); err != nil {
+			return nil, active, err
+		}
+		active = fresh
+	}
+	return nil, active, &protocol.ExceptionError{Code: 5, Function: 0x03}
+}
+
+func advance(t time.Time, typ int) time.Time {
+	switch typ {
+	case protocol.Hourly:
+		return t.Add(time.Hour)
+	case protocol.Monthly, protocol.Total:
+		return t.AddDate(0, 1, 0)
+	default:
+		return t.AddDate(0, 0, 1)
+	}
+}
+
 func due(t time.Time, typ int, now time.Time) bool {
 	switch typ {
 	case protocol.Hourly:
@@ -210,10 +257,15 @@ func parseStart(d []byte, typ int) time.Time {
 		day := int(d[0])
 		if typ == protocol.Monthly || typ == protocol.Total {
 			// The protocol exposes hourly/daily archive starts, not a monthly start.
-			// Start from a conservative historical point; unavailable dates return exception 3.
-			return time.Date(y, m, 1, 0, 0, 0, 0, time.Local).AddDate(-10, 0, 0)
+			// Use the beginning of the reported daily archive as a conservative
+			// lower bound. Code 3 is handled by collectArchive.
+			return time.Date(y, m, 1, 23, 0, 0, 0, time.Local)
 		}
-		return time.Date(y, m, day, 0, 0, 0, 0, time.Local)
+		hour := int(d[3])
+		if typ == protocol.Daily {
+			hour = 23
+		}
+		return time.Date(y, m, day, hour, 0, 0, 0, time.Local)
 	}
 	return time.Now().AddDate(-1, 0, 0)
 }
@@ -230,15 +282,11 @@ func (x *Collector) collectProperties(ctx context.Context, c *protocol.Client, i
 	if e != nil {
 		return e
 	}
-	v, e := protocol.ParseElements(es, d, protocol.Properties)
+	v, e := protocol.ParseProperties(es, d)
 	if e != nil {
 		return e
 	}
-	for k, z := range v {
-		_ = k
-		_ = z
-	}
-	return nil
+	return x.Store.SaveProperties(ctx, id, v)
 }
 
 var _ = fmt.Sprintf
