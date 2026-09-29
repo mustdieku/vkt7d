@@ -277,7 +277,7 @@ func parseStart(d []byte, typ int) time.Time {
 }
 
 func (x *Collector) collectProperties(ctx context.Context, c *protocol.Client, id int64) error {
-	es := []model.Element{{44, "t_unit", 7}, {45, "G_unit", 7}, {46, "V_unit", 7}, {47, "M_unit", 7}, {48, "P_unit", 7}, {53, "Qo_unit", 7}, {55, "BNP_unit", 7}, {56, "VOC_unit", 7}, {57, "t_dec", 1}, {59, "V1_dec", 1}, {60, "M1_dec", 1}, {61, "P_dec", 1}, {66, "Qo1_dec", 1}, {69, "V2_dec", 1}, {70, "M2_dec", 1}, {76, "Qo2_dec", 1}}
+	es := []model.Element{{44, "t_unit", 7}, {45, "G_unit", 7}, {46, "V_unit", 7}, {47, "M_unit", 7}, {48, "P_unit", 7}, {53, "Qo_unit", 7}, {55, "BNP_unit", 7}, {56, "VOC_unit", 7}, {57, "t_dec", 1}, {59, "V1_dec", 1}, {60, "M1_dec", 1}, {61, "P1_dec", 1}, {66, "Qo1_dec", 1}, {69, "V2_dec", 1}, {70, "M2_dec", 1}, {76, "Qo2_dec", 1}}
 	if e := c.SetType(protocol.Properties); e != nil {
 		return e
 	}
