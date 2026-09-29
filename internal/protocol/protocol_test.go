@@ -76,3 +76,43 @@ func TestBeginFrame(t *testing.T) {
 		t.Fatalf("begin frame = %s, want %s", got, want)
 	}
 }
+
+func TestParseService(t *testing.T) {
+	d := []byte{
+		0x27,
+		0x88, 0x02,
+		0x98, 0x0C,
+		'0', '0', '1', '5', '9', '5', '3', '7',
+		7,
+		30,
+		3,
+	}
+
+	s, err := ParseService(d)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if s.Firmware != 0x27 ||
+		s.SchemeTV1 != 648 ||
+		s.SchemeTV2 != 3224 ||
+		s.Subscriber != "00159537" ||
+		s.Address != 7 ||
+		s.ReportDay != 30 ||
+		s.Model != 3 {
+		t.Fatalf("unexpected service info: %+v", s)
+	}
+}
+
+func TestExceptionCode3IsRecognized(t *testing.T) {
+	err := parseException([]byte{7, 0x90, 3, 0, 0, 0})
+	if !IsExceptionCode(err, 3) || !IsArchiveDateMissing(err) {
+		t.Fatalf("exception 3 not recognized: %v", err)
+	}
+}
+
+func TestElementNamePropertyP1Dec(t *testing.T) {
+	if got := ElementName(61); got != "P1_dec" {
+		t.Fatalf("ElementName(61) = %q, want P1_dec", got)
+	}
+}
