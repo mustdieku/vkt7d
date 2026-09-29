@@ -99,15 +99,24 @@ func encode(v map[string]model.Value) (vals, q, ns, raw []byte) {
 func (s *Store) SaveArchive(ctx context.Context, table string, id int64, t time.Time, v map[string]model.Value) error {
 	vals, q, ns, raw := encode(v)
 	var sql string
+	var archiveKey any
 	switch table {
 	case "hourly_archive":
 		sql = `INSERT INTO vkt7.hourly_archive(device_id,archive_time,"values",quality,ns,raw) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(device_id,archive_time) DO UPDATE SET "values"=excluded."values",quality=excluded.quality,ns=excluded.ns,raw=excluded.raw,collected_at=now()`
+		archiveKey = t
 	case "daily_archive", "monthly_archive", "total_archive":
 		sql = fmt.Sprintf(`INSERT INTO vkt7.%s(device_id,archive_date,"values",quality,ns,raw) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(device_id,archive_date) DO UPDATE SET "values"=excluded."values",quality=excluded.quality,ns=excluded.ns,raw=excluded.raw,collected_at=now()`, table)
+		archiveKey = time.Date(
+			t.Year(),
+			t.Month(),
+			t.Day(),
+			0, 0, 0, 0,
+			t.Location(),
+		)
 	default:
 		return fmt.Errorf("bad archive table %q", table)
 	}
-	_, e := s.Pool.Exec(ctx, sql, id, t, vals, q, ns, raw)
+	_, e := s.Pool.Exec(ctx, sql, id, archiveKey, vals, q, ns, raw)
 	return e
 }
 func (s *Store) SaveProperties(ctx context.Context, id int64, v map[string]model.Value) error {

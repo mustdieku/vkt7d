@@ -53,6 +53,14 @@ func (x *Collector) once(ctx context.Context) {
 		x.Store.Log(ctx, id, "protocol_error", e)
 		return
 	}
+	// VKT-7 protocol 5.1:
+	// after BeginSession the first ReadData must be performed so that the
+	// server-version field is consumed before properties/archive operations.
+	if _, e = c.ReadData(); e != nil {
+		x.Log.Error("initial read-data", "error", e)
+		x.Store.Log(ctx, id, "protocol_error", e)
+		return
+	}
 	reportDay := 0
 	if raw, e := c.ReadService(); e != nil {
 		x.Log.Warn("service information", "error", e)
@@ -244,32 +252,178 @@ func (x *Collector) collectArchive(ctx context.Context, c *protocol.Client, id i
 	}
 }
 
-func (x *Collector) readArchiveRecord(c *protocol.Client, typ int, when time.Time, es []model.Element, active []model.Element) (map[string]model.Value, []model.Element, error) {
-	for attempt := 0; attempt < 2; attempt++ {
-		v, err := c.ReadArchiveData(typ, when, es)
-		if err == nil {
-			return v, active, nil
-		}
-		if !protocol.IsExceptionCode(err, 5) {
-			return nil, active, err
+// archiveReadChunkBytes is deliberately kept below the maximum VKT-7 frame
+// size. Some VKT-7 firmware versions behave incorrectly when a large read
+// list is used: the write to 0x3FFF is acknowledged, but the following
+// 0x3FFE response may contain a truncated/stale data section.
+//
+// The protocol itself allows a much larger frame, but splitting the list
+// keeps the actual response small and makes the collector independent of
+// the transmitter-buffer implementation of a particular VKT-7 firmware.
+const archiveReadChunkBytes = 60
+
+func splitArchiveReadList(es []model.Element) [][]model.Element {
+	if len(es) == 0 {
+		return nil
+	}
+
+	var chunks [][]model.Element
+	var current []model.Element
+	currentBytes := 0
+
+	for _, e := range es {
+		// Each returned element consists of:
+		//   value[e.Size] + quality[1] + NS[1]
+		n := e.Size + 2
+
+		// An individual element must always fit.
+		if n > archiveReadChunkBytes {
+			if len(current) > 0 {
+				chunks = append(chunks, current)
+				current = nil
+				currentBytes = 0
+			}
+			chunks = append(chunks, []model.Element{e})
+			continue
 		}
 
-		// The record belongs to another measurement scheme. VKT-7 requires
-		// refreshing the active list and rebuilding the read list.
+		if currentBytes+n > archiveReadChunkBytes && len(current) > 0 {
+			chunks = append(chunks, current)
+			current = nil
+			currentBytes = 0
+		}
+
+		current = append(current, e)
+		currentBytes += n
+	}
+
+	if len(current) > 0 {
+		chunks = append(chunks, current)
+	}
+
+	return chunks
+}
+
+func (x *Collector) readArchiveRecord(c *protocol.Client, typ int, when time.Time, es []model.Element, active []model.Element) (map[string]model.Value, []model.Element, error) {
+	// A VKT-7 archive response is a variable-length sequence. Do not assume
+	// that one large read list is safe for every firmware revision.
+	//
+	// The official protocol explicitly warns about transmitter-buffer
+	// overflow when too many active elements are requested.
+	for attempt := 0; attempt < 2; attempt++ {
+		chunks := splitArchiveReadList(es)
+		if len(chunks) == 0 {
+			return nil, active, fmt.Errorf(
+				"empty archive read list for type %d", typ,
+			)
+		}
+
+		result := make(map[string]model.Value)
+		schemeChanged := false
+
+		for chunkNo, chunk := range chunks {
+			if err := c.SetReadList(chunk); err != nil {
+				if protocol.IsExceptionCode(err, 5) {
+					schemeChanged = true
+					break
+				}
+				return nil, active, fmt.Errorf(
+					"set archive read list chunk %d/%d: %w",
+					chunkNo+1, len(chunks), err,
+				)
+			}
+
+			// The date is deliberately written for every chunk. The VKT-7
+			// protocol says that ReadData uses the date written last, while
+			// changing 0x3FFF changes only the read list.
+			if err := c.SetDate(
+				when,
+				typ == protocol.Daily ||
+					typ == protocol.Monthly ||
+					typ == protocol.Total,
+			); err != nil {
+				if protocol.IsExceptionCode(err, 3) {
+					return nil, active, err
+				}
+				if protocol.IsExceptionCode(err, 5) {
+					schemeChanged = true
+					break
+				}
+				return nil, active, fmt.Errorf(
+					"set archive date %s chunk %d/%d: %w",
+					when.Format(time.RFC3339),
+					chunkNo+1,
+					len(chunks),
+					err,
+				)
+			}
+
+			data, err := c.ReadData()
+			if err != nil {
+				if protocol.IsExceptionCode(err, 3) {
+					return nil, active, err
+				}
+				if protocol.IsExceptionCode(err, 5) {
+					schemeChanged = true
+					break
+				}
+				return nil, active, fmt.Errorf(
+					"read archive %s chunk %d/%d: %w",
+					when.Format(time.RFC3339),
+					chunkNo+1,
+					len(chunks),
+					err,
+				)
+			}
+
+			// ParseElements must consume exactly the data represented by the
+			// current read list. This catches stale/truncated VKT-7 responses
+			// instead of silently writing corrupted records.
+			values, err := protocol.ParseElements(chunk, data, typ)
+			if err != nil {
+				return nil, active, fmt.Errorf(
+					"parse archive %s chunk %d/%d: %w; elements=%d data_len=%d",
+					when.Format(time.RFC3339),
+					chunkNo+1,
+					len(chunks),
+					err,
+					len(chunk),
+					len(data),
+				)
+			}
+
+			for name, value := range values {
+				result[name] = value
+			}
+		}
+
+		if !schemeChanged {
+			return result, active, nil
+		}
+
+		// The record belongs to another measurement scheme. The VKT-7
+		// protocol requires refreshing the active list and rebuilding
+		// the read list before retrying the same timestamp.
 		fresh, err := c.ActiveElements()
 		if err != nil {
 			return nil, active, err
 		}
+
 		es = filter(fresh, typ)
 		if len(es) == 0 {
-			return nil, active, fmt.Errorf("no active elements for archive type %d after scheme change", typ)
+			return nil, active, fmt.Errorf(
+				"no active elements for archive type %d after scheme change",
+				typ,
+			)
 		}
-		if err = c.SetReadList(es); err != nil {
-			return nil, active, err
-		}
+
 		active = fresh
 	}
-	return nil, active, &protocol.ExceptionError{Code: 5, Function: 0x03}
+
+	return nil, active, &protocol.ExceptionError{
+		Code:     5,
+		Function: 0x03,
+	}
 }
 
 func advance(t time.Time, typ int, reportDay int) time.Time {
