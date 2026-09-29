@@ -73,7 +73,7 @@ func (x *Collector) once(ctx context.Context) {
 	}
 	// The report day is required for correct positioning of monthly and
 	// total archives.  0 means that it is not known yet.
-	reportDay, e := x.Store.ReportDay(ctx, id)
+	reportDay, e = x.Store.ReportDay(ctx, id)
 	if e != nil {
 		x.Log.Warn("device report day", "error", e)
 		reportDay = 0
