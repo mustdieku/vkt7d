@@ -63,6 +63,16 @@ func (x *Collector) once(ctx context.Context) {
 		x.Store.Log(ctx, id, "protocol_error", e)
 		return
 	}
+	// The report day is required for correct positioning of monthly and
+	// total archives.  0 means that it is not known yet.
+	reportDay, e := x.Store.ReportDay(ctx, id)
+	if e != nil {
+		x.Log.Warn("device report day", "error", e)
+		reportDay = 0
+	}
+	if reportDay < 1 || reportDay > 31 {
+		reportDay = 30
+	}
 	if e = x.Store.UpsertActive(ctx, id, es); e != nil {
 		x.Log.Error("save active elements", "error", e)
 	}
@@ -73,7 +83,7 @@ func (x *Collector) once(ctx context.Context) {
 		step  time.Duration
 		batch int
 	}{{0, "hourly_archive", time.Hour, x.Cfg.BatchHourly}, {1, "daily_archive", 24 * time.Hour, x.Cfg.BatchDaily}, {2, "monthly_archive", 0, x.Cfg.BatchMonthly}, {3, "total_archive", 0, x.Cfg.BatchTotal}} {
-		x.collectArchive(ctx, c, id, es, job.typ, job.table, job.step, job.batch)
+		x.collectArchive(ctx, c, id, es, job.typ, job.table, job.step, job.batch, reportDay)
 	}
 	if v, e := c.ReadCurrent(protocol.Current, filter(es, protocol.Current)); e == nil {
 		_ = x.Store.SaveCurrent(ctx, "current_values", id, v)
@@ -109,7 +119,7 @@ func meaningful(a, typ int) bool {
 	return false
 }
 
-func (x *Collector) collectArchive(ctx context.Context, c *protocol.Client, id int64, active []model.Element, typ int, table string, step time.Duration, batch int) {
+func (x *Collector) collectArchive(ctx context.Context, c *protocol.Client, id int64, active []model.Element, typ int, table string, step time.Duration, batch int, reportDay int) {
 	es := filter(active, typ)
 	if len(es) == 0 {
 		return
@@ -133,7 +143,7 @@ func (x *Collector) collectArchive(ctx context.Context, c *protocol.Client, id i
 			x.Log.Warn("archive range", "table", table, "error", e)
 			return
 		}
-		start = parseStart(r, typ)
+		start = parseStart(r, typ, reportDay)
 	} else {
 		start = next(*last, typ)
 		if x.Cfg.Overlap > 0 {
@@ -158,10 +168,21 @@ func (x *Collector) collectArchive(ctx context.Context, c *protocol.Client, id i
 		v, fresh, e := x.readArchiveRecord(c, typ, start, es, active)
 		if e != nil {
 			if protocol.IsExceptionCode(e, 3) {
-				// 0x3FF6 gives an archive lower bound. Some devices can still
-				// return code 3 for that exact timestamp (rollover/incomplete
-				// first record). Do not permanently block collection on it.
-				start = advance(start, typ)
+				// Exception 3 means that there is no record for the
+				// requested chronological mark. This is normal at the
+				// beginning/end of an archive and must not terminate the
+				// collector.
+				//
+				// For monthly/total archives we must move to the next
+				// report date, not simply add one calendar month to an
+				// arbitrary day such as the first day of the month.
+				nextStart := advance(start, typ, reportDay)
+				if !nextStart.After(start) {
+					x.Log.Warn("archive date did not advance",
+						"type", typ, "date", start)
+					return
+				}
+				start = nextStart
 				i--
 				continue
 			}
@@ -213,15 +234,52 @@ func (x *Collector) readArchiveRecord(c *protocol.Client, typ int, when time.Tim
 	return nil, active, &protocol.ExceptionError{Code: 5, Function: 0x03}
 }
 
-func advance(t time.Time, typ int) time.Time {
+func advance(t time.Time, typ int, reportDay int) time.Time {
 	switch typ {
 	case protocol.Hourly:
 		return t.Add(time.Hour)
 	case protocol.Monthly, protocol.Total:
-		return t.AddDate(0, 1, 0)
+		return monthReportDate(t, 1, reportDay)
 	default:
 		return t.AddDate(0, 0, 1)
 	}
+}
+
+// monthReportDate returns the report date for a month. VKT-7 stores monthly
+// archive records at the configured report day and hour 23. If a report day
+// is outside the month (e.g. 30 February), clamp it to the last day.
+func monthReportDate(t time.Time, monthOffset int, reportDay int) time.Time {
+	first := time.Date(
+		t.Year(),
+		t.Month()+time.Month(monthOffset),
+		1,
+		23, 0, 0, 0,
+		t.Location(),
+	)
+
+	lastDay := time.Date(
+		first.Year(),
+		first.Month()+1,
+		0,
+		23, 0, 0, 0,
+		first.Location(),
+	).Day()
+
+	day := reportDay
+	if day < 1 {
+		day = 1
+	}
+	if day > lastDay {
+		day = lastDay
+	}
+
+	return time.Date(
+		first.Year(),
+		first.Month(),
+		day,
+		23, 0, 0, 0,
+		first.Location(),
+	)
 }
 
 func due(t time.Time, typ int, now time.Time) bool {
@@ -244,40 +302,86 @@ func next(t time.Time, typ int) time.Time {
 	case protocol.Hourly:
 		return t.Add(time.Hour)
 	case protocol.Monthly, protocol.Total:
-		return time.Date(
-			t.Year(),
-			t.Month()+1,
-			1,
-			0, 0, 0, 0,
-			t.Location(),
-		)
+		return monthReportDate(t, 1, 30)
 	default:
 		return t.AddDate(0, 0, 1)
 	}
 }
 
-func parseStart(d []byte, typ int) time.Time {
-	if len(d) >= 3 {
-		y := 2000 + int(d[2])
-		m := time.Month(d[1])
-		day := int(d[0])
-		if typ == protocol.Monthly || typ == protocol.Total {
-			// The protocol exposes hourly/daily archive starts, not a monthly start.
-			// Use the beginning of the reported daily archive as a conservative
-			// lower bound. Code 3 is handled by collectArchive.
-			return time.Date(y, m, 1, 23, 0, 0, 0, time.Local)
+func parseStart(d []byte, typ int, reportDay int) time.Time {
+	// 0x3FF6 returns:
+	//   [0:4]  start of hourly archive
+	//   [4:8]  current date
+	//   [8:12] start of daily archive
+	//
+	// It does NOT return a monthly/total archive start date.
+	if len(d) >= 12 {
+		var hourly = parseVTDate(d[0:4])
+		var daily = parseVTDate(d[8:12])
+
+		switch typ {
+		case protocol.Hourly:
+			return hourly
+		case protocol.Daily:
+			return daily
+		case protocol.Monthly, protocol.Total:
+			// Monthly and total archives use the report day. The
+			// daily archive start provides the earliest known month.
+			return monthReportDate(daily, 0, reportDay)
 		}
-		hour := int(d[3])
-		if typ == protocol.Daily {
-			hour = 23
-		}
-		return time.Date(y, m, day, hour, 0, 0, 0, time.Local)
 	}
+
+	// Older firmware may return only the hourly/current dates.
+	if len(d) >= 4 {
+		start := parseVTDate(d[0:4])
+		switch typ {
+		case protocol.Hourly:
+			return start
+		case protocol.Daily:
+			return time.Date(
+				start.Year(), start.Month(), start.Day(),
+				23, 0, 0, 0, start.Location(),
+			)
+		case protocol.Monthly, protocol.Total:
+			return monthReportDate(start, 0, reportDay)
+		}
+	}
+
 	return time.Now().AddDate(-1, 0, 0)
 }
 
+func parseVTDate(d []byte) time.Time {
+	if len(d) >= 4 {
+		y := 2000 + int(d[2])
+		m := time.Month(d[1])
+		day := int(d[0])
+		hour := int(d[3])
+		return time.Date(y, m, day, hour, 0, 0, 0, time.Local)
+	}
+	return time.Time{}
+}
+
 func (x *Collector) collectProperties(ctx context.Context, c *protocol.Client, id int64) error {
-	es := []model.Element{{44, "t_unit", 7}, {45, "G_unit", 7}, {46, "V_unit", 7}, {47, "M_unit", 7}, {48, "P_unit", 7}, {53, "Qo_unit", 7}, {55, "BNP_unit", 7}, {56, "VOC_unit", 7}, {57, "t_dec", 1}, {59, "V1_dec", 1}, {60, "M1_dec", 1}, {61, "P1_dec", 1}, {66, "Qo1_dec", 1}, {69, "V2_dec", 1}, {70, "M2_dec", 1}, {76, "Qo2_dec", 1}}
+	// Names are the actual VKT-7 element names from the protocol.
+	// In particular, pressure precision is P1_dec/P2_dec, not P_dec.
+	es := []model.Element{
+		{44, "t_unit", 7},
+		{45, "G_unit", 7},
+		{46, "V_unit", 7},
+		{47, "M_unit", 7},
+		{48, "P_unit", 7},
+		{53, "Qo_unit", 7},
+		{55, "BNP_unit", 7},
+		{56, "VOC_unit", 7},
+		{57, "t_dec", 1},
+		{59, "V1_dec", 1},
+		{60, "M1_dec", 1},
+		{61, "P1_dec", 1},
+		{66, "Qo1_dec", 1},
+		{69, "V2_dec", 1},
+		{70, "M2_dec", 1},
+		{76, "Qo2_dec", 1},
+	}
 	if e := c.SetType(protocol.Properties); e != nil {
 		return e
 	}

@@ -40,6 +40,25 @@ func (s *Store) Device(ctx context.Context, name string, address int, port strin
 	e := s.Pool.QueryRow(ctx, `INSERT INTO vkt7.devices(name,address,serial_port,baud_rate) VALUES($1,$2,$3,$4) ON CONFLICT(name) DO UPDATE SET address=excluded.address,serial_port=excluded.serial_port,baud_rate=excluded.baud_rate,updated_at=now() RETURNING id`, name, address, port, baud).Scan(&id)
 	return id, e
 }
+
+// ReportDay returns the configured monthly report day stored for the device.
+// A value of zero means that the information has not been collected yet.
+func (s *Store) ReportDay(ctx context.Context, id int64) (int, error) {
+	var day int
+	err := s.Pool.QueryRow(ctx, `
+		SELECT COALESCE(report_day, 0)
+		FROM vkt7.devices
+		WHERE id=$1
+	`, id).Scan(&day)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	return day, nil
+}
+
 func (s *Store) Touch(ctx context.Context, id int64, fw, sv, sc1, sc2, sub, report, modelNo, db int) error {
 	_, e := s.Pool.Exec(ctx, `UPDATE vkt7.devices SET firmware_version=$2,server_version=$3,scheme_tv1=$4,scheme_tv2=$5,subscriber_id=$6,report_day=$7,model=$8,active_db=$9,last_seen_at=now(),updated_at=now() WHERE id=$1`, id, fw, sv, sc1, sc2, sub, report, modelNo, db)
 	return e
