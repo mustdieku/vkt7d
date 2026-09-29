@@ -196,6 +196,32 @@ func (c *Client) ReadService() ([]byte, error) {
 	}
 	return dataPart(r), nil
 }
+// ServiceInfo is the version >= 1.5 service-information record returned by
+// register 0x3FF9. The protocol stores scheme numbers as little-endian
+// uint16 values and the report day as a single byte.
+type ServiceInfo struct {
+	Firmware   int
+	SchemeTV1  int
+	SchemeTV2  int
+	Subscriber string
+	Address    int
+	ReportDay  int
+	Model      int
+}
+func ParseService(d []byte) (ServiceInfo, error) {
+	if len(d) < 16 {
+		return ServiceInfo{}, fmt.Errorf("short service response: %x", d)
+	}
+	return ServiceInfo{
+		Firmware:   int(d[0]),
+		SchemeTV1:  int(binary.LittleEndian.Uint16(d[1:3])),
+		SchemeTV2:  int(binary.LittleEndian.Uint16(d[3:5])),
+		Subscriber: strings.TrimRight(string(d[5:13]), "\x00 "),
+		Address:    int(d[13]),
+		ReportDay:  int(d[14]),
+		Model:      int(d[15]),
+	}, nil
+}
 func (c *Client) ReadRange() ([]byte, error) {
 	r, e := c.read(RegRange, 0)
 	if e != nil {
@@ -287,7 +313,12 @@ func (e *ExceptionError) Error() string {
 
 func IsExceptionCode(err error, code byte) bool {
 	var ex *ExceptionError
-	return errors.As(err, &ex) && ex.Code == code
+	if errors.As(err, &ex) {
+		return ex.Code == code
+	}
+	// Exception code 3 is represented by ErrArchiveDateMissing so callers can
+	// distinguish an absent archive record from a transport/protocol failure.
+	return code == 3 && IsArchiveDateMissing(err)
 }
 
 

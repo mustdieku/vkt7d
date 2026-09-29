@@ -53,6 +53,14 @@ func (x *Collector) once(ctx context.Context) {
 		x.Store.Log(ctx, id, "protocol_error", e)
 		return
 	}
+	reportDay := 0
+	if raw, e := c.ReadService(); e != nil {
+		x.Log.Warn("service information", "error", e)
+	} else if svc, e := protocol.ParseService(raw); e != nil {
+		x.Log.Warn("service information", "error", e)
+	} else {
+		reportDay = svc.ReportDay
+	}
 	// Properties are refreshed every session, then active list is obtained.
 	if e := x.collectProperties(ctx, c, id); e != nil {
 		x.Log.Warn("properties", "error", e)
@@ -133,12 +141,14 @@ func (x *Collector) collectArchive(ctx context.Context, c *protocol.Client, id i
 			x.Log.Warn("archive range", "table", table, "error", e)
 			return
 		}
-		start = parseStart(r, typ)
+		start = parseStart(r, typ, reportDay)
 	} else {
 		start = next(*last, typ)
 		if x.Cfg.Overlap > 0 {
 			if typ == protocol.Hourly {
 				start = start.Add(-time.Duration(x.Cfg.Overlap) * time.Hour)
+			} else if typ == protocol.Monthly || typ == protocol.Total {
+				start = start.AddDate(0, -x.Cfg.Overlap, 0)
 			} else {
 				start = start.AddDate(0, 0, -x.Cfg.Overlap)
 			}
@@ -161,7 +171,7 @@ func (x *Collector) collectArchive(ctx context.Context, c *protocol.Client, id i
 				// 0x3FF6 gives an archive lower bound. Some devices can still
 				// return code 3 for that exact timestamp (rollover/incomplete
 				// first record). Do not permanently block collection on it.
-				start = advance(start, typ)
+				start = advance(start, typ, reportDay)
 				i--
 				continue
 			}
@@ -180,7 +190,7 @@ func (x *Collector) collectArchive(ctx context.Context, c *protocol.Client, id i
 		if typ == protocol.Hourly {
 			start = start.Add(time.Hour)
 		} else {
-			start = next(start, typ)
+			start = next(start, typ, reportDay)
 		}
 	}
 }
@@ -213,12 +223,12 @@ func (x *Collector) readArchiveRecord(c *protocol.Client, typ int, when time.Tim
 	return nil, active, &protocol.ExceptionError{Code: 5, Function: 0x03}
 }
 
-func advance(t time.Time, typ int) time.Time {
+func advance(t time.Time, typ int, reportDay int) time.Time {
 	switch typ {
 	case protocol.Hourly:
 		return t.Add(time.Hour)
 	case protocol.Monthly, protocol.Total:
-		return t.AddDate(0, 1, 0)
+		return monthlyReportDate(t.AddDate(0, 1, 0), reportDay)
 	default:
 		return t.AddDate(0, 0, 1)
 	}
@@ -231,49 +241,79 @@ func due(t time.Time, typ int, now time.Time) bool {
 	case protocol.Daily:
 		return !t.After(now.AddDate(0, 0, -1))
 	case protocol.Monthly, protocol.Total:
-		// Conservative: never request a future month. The device's report-day setting
-		// is persisted in the device row and should be used for production scheduling.
-		return !t.After(now.AddDate(0, 0, -1))
+		// Monthly and total records are formed at the end of the report day.
+		return t.Before(time.Date(
+			now.Year(), now.Month(), now.Day(),
+			0, 0, 0, 0, now.Location(),
+		))
 	default:
 		return false
 	}
 }
 
-func next(t time.Time, typ int) time.Time {
+func next(t time.Time, typ int, reportDay int) time.Time {
 	switch typ {
 	case protocol.Hourly:
 		return t.Add(time.Hour)
 	case protocol.Monthly, protocol.Total:
-		return time.Date(
-			t.Year(),
-			t.Month()+1,
-			1,
-			0, 0, 0, 0,
-			t.Location(),
-		)
+		return monthlyReportDate(t.AddDate(0, 1, 0), reportDay)
 	default:
 		return t.AddDate(0, 0, 1)
 	}
 }
 
-func parseStart(d []byte, typ int) time.Time {
-	if len(d) >= 3 {
-		y := 2000 + int(d[2])
-		m := time.Month(d[1])
-		day := int(d[0])
-		if typ == protocol.Monthly || typ == protocol.Total {
-			// The protocol exposes hourly/daily archive starts, not a monthly start.
-			// Use the beginning of the reported daily archive as a conservative
-			// lower bound. Code 3 is handled by collectArchive.
-			return time.Date(y, m, 1, 23, 0, 0, 0, time.Local)
-		}
-		hour := int(d[3])
-		if typ == protocol.Daily {
-			hour = 23
-		}
-		return time.Date(y, m, day, hour, 0, 0, 0, time.Local)
+func parseStart(d []byte, typ int, reportDay int) time.Time {
+	if len(d) < 12 {
+		return time.Now().AddDate(-1, 0, 0)
 	}
-	return time.Now().AddDate(-1, 0, 0)
+
+	// 0x3FF6:
+	//   [0:4]  hourly archive start
+	//   [4:8]  current date/time
+	//   [8:12] daily archive start
+	off := 0
+	if typ != protocol.Hourly {
+		off = 8
+	}
+
+	y := 2000 + int(d[off+2])
+	m := time.Month(d[off+1])
+	day := int(d[off])
+	hour := int(d[off+3])
+
+	if typ == protocol.Daily {
+		hour = 23
+	}
+
+	if typ == protocol.Monthly || typ == protocol.Total {
+		return monthlyReportDate(
+			time.Date(y, m, day, 23, 0, 0, 0, time.Local),
+			reportDay,
+		)
+	}
+
+	return time.Date(y, m, day, hour, 0, 0, 0, time.Local)
+}
+
+func monthlyReportDate(t time.Time, reportDay int) time.Time {
+	if reportDay < 1 || reportDay > 31 {
+		reportDay = 1
+	}
+
+	// Clamp the report day to the actual last day of the month.
+	last := time.Date(
+		t.Year(), t.Month()+1, 0,
+		23, 0, 0, 0, t.Location(),
+	)
+	day := reportDay
+	if day > last.Day() {
+		day = last.Day()
+	}
+
+	return time.Date(
+		t.Year(), t.Month(), day,
+		23, 0, 0, 0, t.Location(),
+	)
 }
 
 func (x *Collector) collectProperties(ctx context.Context, c *protocol.Client, id int64) error {
