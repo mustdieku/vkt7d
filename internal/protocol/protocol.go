@@ -336,7 +336,12 @@ func IsArchiveDateMissing(err error) bool {
 func parseException(r []byte) error {
 	if len(r) >= 3 && r[1]&0x80 != 0 {
 		if r[2] == 3 {
-			return fmt.Errorf("%w: exception code=3", ErrArchiveDateMissing)
+			// Preserve both meanings: code 3 is an archive-date exception and
+			// it is also the semantic "date is absent" condition.
+			return fmt.Errorf("%w: %w", ErrArchiveDateMissing, &ExceptionError{
+				Code:     3,
+				Function: r[1] & 0x7f,
+			})
 		}
 		return &ExceptionError{Code: r[2], Function: r[1] & 0x7f}
 	}
