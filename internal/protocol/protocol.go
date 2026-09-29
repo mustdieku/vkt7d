@@ -312,15 +312,13 @@ func (e *ExceptionError) Error() string {
 }
 
 func IsExceptionCode(err error, code byte) bool {
-	var ex *ExceptionError
-	if errors.As(err, &ex) {
-		return ex.Code == code
+	if code == 3 && IsArchiveDateMissing(err) {
+		return true
 	}
-	// Exception code 3 is represented by ErrArchiveDateMissing so callers can
-	// distinguish an absent archive record from a transport/protocol failure.
-	return code == 3 && IsArchiveDateMissing(err)
-}
 
+	var ex *ExceptionError
+	return errors.As(err, &ex) && ex.Code == code
+}
 
 // ErrArchiveDateMissing is returned when the VKT-7 explicitly reports
 // exception code 3 for the requested archive date.

@@ -153,7 +153,7 @@ func (x *Collector) collectArchive(ctx context.Context, c *protocol.Client, id i
 		}
 		start = parseStart(r, typ, reportDay)
 	} else {
-		start = next(*last, typ)
+		start = next(*last, typ, reportDay)
 		if x.Cfg.Overlap > 0 {
 			if typ == protocol.Hourly {
 				start = start.Add(-time.Duration(x.Cfg.Overlap) * time.Hour)
@@ -314,7 +314,7 @@ func next(t time.Time, typ int, reportDay int) time.Time {
 	case protocol.Hourly:
 		return t.Add(time.Hour)
 	case protocol.Monthly, protocol.Total:
-		return monthReportDate(t, 1, 30)
+		return monthReportDate(t, 1, reportDay)
 	default:
 		return t.AddDate(0, 0, 1)
 	}
