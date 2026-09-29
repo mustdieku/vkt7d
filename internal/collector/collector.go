@@ -178,12 +178,6 @@ func (x *Collector) collectArchive(ctx context.Context, c *protocol.Client, id i
 		v, fresh, e := x.readArchiveRecord(c, typ, start, es, active)
 		if e != nil {
 			if protocol.IsExceptionCode(e, 3) {
-<<<<<<< HEAD
-				// 0x3FF6 gives an archive lower bound. Some devices can still
-				// return code 3 for that exact timestamp (rollover/incomplete
-				// first record). Do not permanently block collection on it.
-				start = advance(start, typ, reportDay)
-=======
 				// Exception 3 means that there is no record for the
 				// requested chronological mark. This is normal at the
 				// beginning/end of an archive and must not terminate the
@@ -199,7 +193,6 @@ func (x *Collector) collectArchive(ctx context.Context, c *protocol.Client, id i
 					return
 				}
 				start = nextStart
->>>>>>> 005f7fc1c8cd1961f42cf3ca0d343af1a2f51090
 				i--
 				continue
 			}
@@ -256,11 +249,7 @@ func advance(t time.Time, typ int, reportDay int) time.Time {
 	case protocol.Hourly:
 		return t.Add(time.Hour)
 	case protocol.Monthly, protocol.Total:
-<<<<<<< HEAD
-		return monthlyReportDate(t.AddDate(0, 1, 0), reportDay)
-=======
 		return monthReportDate(t, 1, reportDay)
->>>>>>> 005f7fc1c8cd1961f42cf3ca0d343af1a2f51090
 	default:
 		return t.AddDate(0, 0, 1)
 	}
@@ -325,70 +314,13 @@ func next(t time.Time, typ int, reportDay int) time.Time {
 	case protocol.Hourly:
 		return t.Add(time.Hour)
 	case protocol.Monthly, protocol.Total:
-<<<<<<< HEAD
-		return monthlyReportDate(t.AddDate(0, 1, 0), reportDay)
-=======
 		return monthReportDate(t, 1, 30)
->>>>>>> 005f7fc1c8cd1961f42cf3ca0d343af1a2f51090
 	default:
 		return t.AddDate(0, 0, 1)
 	}
 }
 
 func parseStart(d []byte, typ int, reportDay int) time.Time {
-<<<<<<< HEAD
-	if len(d) < 12 {
-		return time.Now().AddDate(-1, 0, 0)
-	}
-
-	// 0x3FF6:
-	//   [0:4]  hourly archive start
-	//   [4:8]  current date/time
-	//   [8:12] daily archive start
-	off := 0
-	if typ != protocol.Hourly {
-		off = 8
-	}
-
-	y := 2000 + int(d[off+2])
-	m := time.Month(d[off+1])
-	day := int(d[off])
-	hour := int(d[off+3])
-
-	if typ == protocol.Daily {
-		hour = 23
-	}
-
-	if typ == protocol.Monthly || typ == protocol.Total {
-		return monthlyReportDate(
-			time.Date(y, m, day, 23, 0, 0, 0, time.Local),
-			reportDay,
-		)
-	}
-
-	return time.Date(y, m, day, hour, 0, 0, 0, time.Local)
-}
-
-func monthlyReportDate(t time.Time, reportDay int) time.Time {
-	if reportDay < 1 || reportDay > 31 {
-		reportDay = 1
-	}
-
-	// Clamp the report day to the actual last day of the month.
-	last := time.Date(
-		t.Year(), t.Month()+1, 0,
-		23, 0, 0, 0, t.Location(),
-	)
-	day := reportDay
-	if day > last.Day() {
-		day = last.Day()
-	}
-
-	return time.Date(
-		t.Year(), t.Month(), day,
-		23, 0, 0, 0, t.Location(),
-	)
-=======
 	// 0x3FF6 returns:
 	//   [0:4]  start of hourly archive
 	//   [4:8]  current date
@@ -439,7 +371,6 @@ func parseVTDate(d []byte) time.Time {
 		return time.Date(y, m, day, hour, 0, 0, 0, time.Local)
 	}
 	return time.Time{}
->>>>>>> 005f7fc1c8cd1961f42cf3ca0d343af1a2f51090
 }
 
 func (x *Collector) collectProperties(ctx context.Context, c *protocol.Client, id int64) error {
