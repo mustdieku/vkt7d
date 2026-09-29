@@ -401,13 +401,16 @@ func (c *Client) ActiveElements() ([]model.Element, error) {
 	if len(d)%6 != 0 {
 		return nil, fmt.Errorf("invalid active-elements data length: %d (raw=%X)", len(d), d)
 	}
+	if len(d) == 0 {
+		return nil, fmt.Errorf("empty active-elements response (raw=%X)", r)
+	}
 
 	var es []model.Element
 
 	for i := 0; i+6 <= len(d); i += 6 {
-		// VKT-7 returns the active-element address with
-		// bit 30 set (0x40000000). The actual element number
-		// is contained in the lower bits.
+		// The active-element list contains the logical address directly.
+		// 0x40000000 is required only when constructing the read-list
+		// written to register 0x3FFF (protocol section 4.2).
 		a := int(binary.LittleEndian.Uint32(d[i:i+4]) & 0x3FFFFFFF)
 		sz := int(binary.LittleEndian.Uint16(d[i+4 : i+6]))
 
@@ -419,7 +422,9 @@ func (c *Client) ActiveElements() ([]model.Element, error) {
 			})
 		}
 	}
-
+	if len(es) == 0 {
+		return nil, fmt.Errorf("active-elements response contains no supported logical addresses (raw=%X)", d)
+	}
 	if c.Debug && c.Log != nil {
 		c.Log.Debug("vkt7 active-elements parsed", "count", len(es))
 	}

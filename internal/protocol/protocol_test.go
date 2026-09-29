@@ -116,3 +116,24 @@ func TestElementNamePropertyP1Dec(t *testing.T) {
 		t.Fatalf("ElementName(61) = %q, want P1_dec", got)
 	}
 }
+
+func TestParseActiveElementsUsesLogicalAddress(t *testing.T) {
+	// Two active elements: logical addresses 44 and 82. The active list
+	// itself contains the logical address; 0x40000000 is added only when
+	// writing the read list.
+	d := make([]byte, 12)
+	binary.LittleEndian.PutUint32(d[0:4], 44)
+	binary.LittleEndian.PutUint16(d[4:6], 7)
+	binary.LittleEndian.PutUint32(d[6:10], 82)
+	binary.LittleEndian.PutUint16(d[10:12], 1)
+
+	es := make([]model.Element, 0, 2)
+	for i := 0; i < len(d); i += 6 {
+		a := int(binary.LittleEndian.Uint32(d[i:i+4]) & 0x3FFFFFFF)
+		sz := int(binary.LittleEndian.Uint16(d[i+4 : i+6]))
+		es = append(es, model.Element{Address: a, Name: ElementName(a), Size: sz})
+	}
+	if len(es) != 2 || es[0].Address != 44 || es[1].Address != 82 {
+		t.Fatalf("unexpected active elements: %+v", es)
+	}
+}

@@ -201,7 +201,9 @@ func (s *Store) Last(ctx context.Context, table string, id int64) (*time.Time, e
 	if err != nil {
 		return nil, err
 	}
-
+	// Return a copy owned by the caller. pgx returns a value in the database
+	// connection's location; archive cursor arithmetic is performed in the
+	// device/local timezone elsewhere in the collector.
 	return &t, nil
 }
 func (s *Store) CurrentLast(ctx context.Context, table string, id int64) (*time.Time, error) {

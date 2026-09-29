@@ -47,7 +47,7 @@ func (x *Collector) once(ctx context.Context) {
 		return
 	}
 	defer port.Close()
-	c := &protocol.Client{Port: port, Address: byte(x.Cfg.Address), Timeout: x.Cfg.Timeout, Log: x.Log}
+	c := &protocol.Client{Port: port, Address: byte(x.Cfg.Address), Timeout: x.Cfg.Timeout, Log: x.Log, Debug: x.Cfg.DebugSerial}
 	if e = c.Begin(); e != nil {
 		x.Log.Error("begin session", "error", e)
 		x.Store.Log(ctx, id, "protocol_error", e)
@@ -65,12 +65,20 @@ func (x *Collector) once(ctx context.Context) {
 	if e := x.collectProperties(ctx, c, id); e != nil {
 		x.Log.Warn("properties", "error", e)
 	}
+	x.Log.Debug("collector: reading active elements")
 	es, e := c.ActiveElements()
 	if e != nil {
 		x.Log.Error("active elements", "error", e)
 		x.Store.Log(ctx, id, "protocol_error", e)
 		return
 	}
+	if len(es) == 0 {
+		e := fmt.Errorf("VKT-7 returned an empty active-element list")
+		x.Log.Error("active elements", "error", e)
+		x.Store.Log(ctx, id, "protocol_error", e)
+		return
+	}
+	x.Log.Debug("collector: active elements ready", "count", len(es))
 	// The report day is required for correct positioning of monthly and
 	// total archives.  0 means that it is not known yet.
 	reportDay, e := x.Store.ReportDay(ctx, id)
@@ -128,14 +136,33 @@ func meaningful(a, typ int) bool {
 }
 
 func (x *Collector) collectArchive(ctx context.Context, c *protocol.Client, id int64, active []model.Element, typ int, table string, step time.Duration, batch int, reportDay int) {
-	es := filter(active, typ)
-	if len(es) == 0 {
+	x.Log.Info("archive start", "table", table, "type", typ)
+
+	// VKT-7 protocol section 5.4 requires this order for every archive type:
+	// set value type -> read active elements -> write read list -> write date
+	// -> read data. The active list is independent of the archive type, but
+	// the protocol explicitly requires it to be requested as part of the
+	// archive preparation and it can change after a scheme switch.
+	if e := c.SetType(byte(typ)); e != nil {
+		x.Log.Warn("set archive type", "table", table, "error", e)
 		return
 	}
-	// The type and read list are constant for the sequential read below.
-	// The protocol explicitly permits the first three archive operations to
-	// be performed once for a cyclic read.
-	if e := c.PrepareArchive(typ, es); e != nil {
+	freshActive, e := c.ActiveElements()
+	if e != nil {
+		x.Log.Warn("archive active elements", "table", table, "error", e)
+		return
+	}
+	if len(freshActive) == 0 {
+		x.Log.Warn("archive active elements", "table", table, "error", "empty active-element list")
+		return
+	}
+	active = freshActive
+	es := filter(active, typ)
+	if len(es) == 0 {
+		x.Log.Warn("archive read list", "table", table, "error", "no meaningful active elements")
+		return
+	}
+	if e := c.SetReadList(es); e != nil {
 		x.Log.Warn("prepare archive", "table", table, "error", e)
 		return
 	}
@@ -168,6 +195,7 @@ func (x *Collector) collectArchive(ctx context.Context, c *protocol.Client, id i
 	if limit <= 0 {
 		limit = 1
 	}
+	x.Log.Info("archive cursor", "table", table, "start", start, "batch", limit, "last", last)
 	for i := 0; i < limit; i++ {
 		if ctx.Err() != nil {
 			return
@@ -394,6 +422,7 @@ func (x *Collector) collectProperties(ctx context.Context, c *protocol.Client, i
 		{70, "M2_dec", 1},
 		{76, "Qo2_dec", 1},
 	}
+	x.Log.Debug("collector: reading properties", "elements", len(es))
 	if e := c.SetType(protocol.Properties); e != nil {
 		return e
 	}
