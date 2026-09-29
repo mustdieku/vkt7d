@@ -371,7 +371,15 @@ func (c *Client) SetDate(t time.Time, dailyLike bool) error {
 	if dailyLike {
 		hour = 23
 	}
-	r, e := c.write(RegDate, 0, []byte{byte(t.Day()), byte(t.Month()), byte(t.Year() - 2000), hour})
+	// VKT-7 function 0x10 requires the byte-count field before the payload.
+	// The date payload itself is exactly 4 bytes: day, month, year-2000, hour.
+	r, e := c.write(RegDate, 0, []byte{
+		4,
+		byte(t.Day()),
+		byte(t.Month()),
+		byte(t.Year() - 2000),
+		hour,
+	})
 	if e != nil {
 		return e
 	}
