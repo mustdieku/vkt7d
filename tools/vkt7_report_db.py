@@ -361,6 +361,55 @@ def unit_for(
     return property_text(properties, f"{name}_unit", default)
 
 
+def decimals_for_archive(
+    properties: Dict[str, PropertyInfo],
+    archive_name: str,
+    default: int,
+) -> int:
+    """Return the _dec precision applicable to an archive JSON key.
+
+    Examples:
+        t1_1  -> t_dec
+        M1_2  -> M1_dec
+        Qo_1  -> Qo1_dec
+        Qo_2  -> Qo2_dec
+        V1_2  -> V1_dec
+        P2_1  -> P2_dec
+        BNP_2 -> BNP_dec (if present)
+
+    The TV suffix (_1/_2) identifies the thermal circuit and is not part
+    of the property name.  Qo is the only reported quantity whose property
+    name additionally contains the TV number.
+    """
+    if archive_name.endswith("_1"):
+        base = archive_name[:-2]
+        tv = 1
+    elif archive_name.endswith("_2"):
+        base = archive_name[:-2]
+        tv = 2
+    else:
+        base = archive_name
+        tv = None
+
+    if base == "Qo":
+        property_name = f"Qo{tv}_dec" if tv is not None else "Qo_dec"
+    else:
+        property_name = f"{base}_dec"
+
+    return decimals_for(properties, property_name[:-4], default)
+
+
+def decimals_for_element(
+    properties: Dict[str, PropertyInfo],
+    element_address: int,
+    default: int,
+) -> int:
+    archive_name = ARCHIVE_NAMES.get(element_address)
+    if archive_name is None:
+        return default
+    return decimals_for_archive(properties, archive_name, default)
+
+
 # -----------------------------------------------------------------------------
 # Archive value extraction
 # -----------------------------------------------------------------------------
@@ -466,16 +515,23 @@ def create_pdf(
     )
 
     # Precision and units are taken from properties.
-    t_dec = decimals_for(properties, "t", 2)
-    m1_dec = decimals_for(properties, "M1", 2)
-    m2_dec = decimals_for(properties, "M2", 2)
-    p1_dec = decimals_for(properties, "P1", 2)
-    p2_dec = decimals_for(properties, "P2", 2)
-    qo1_dec = decimals_for(properties, "Qo1", 3)
-    qo2_dec = decimals_for(properties, "Qo2", 3)
-    # TV2 V1 is V1_2; in the VKT-7 property set its precision is V2_dec.
-    tv2_v1_dec = decimals_for(properties, "V2", 2)
-    bnp_dec = decimals_for(properties, "BNP", 2)
+    # The property name is derived from the actual archive key, so V1_2
+    # uses V1_dec (not V2_dec), Qo_2 uses Qo2_dec, etc.
+    tv1_qo_dec = decimals_for_element(properties, REPORT_ELEMENTS["TV1"]["Qo"], 3)
+    tv1_m1_dec = decimals_for_element(properties, REPORT_ELEMENTS["TV1"]["M1"], 2)
+    tv1_m2_dec = decimals_for_element(properties, REPORT_ELEMENTS["TV1"]["M2"], 2)
+    tv1_t1_dec = decimals_for_element(properties, REPORT_ELEMENTS["TV1"]["t1"], 2)
+    tv1_t2_dec = decimals_for_element(properties, REPORT_ELEMENTS["TV1"]["t2"], 2)
+    tv1_dt_dec = decimals_for_element(properties, REPORT_ELEMENTS["TV1"]["dt"], tv1_t1_dec)
+    tv1_p1_dec = decimals_for_element(properties, REPORT_ELEMENTS["TV1"]["P1"], 2)
+    tv1_p2_dec = decimals_for_element(properties, REPORT_ELEMENTS["TV1"]["P2"], 2)
+    tv1_bnp_dec = decimals_for_element(properties, REPORT_ELEMENTS["TV1"]["BNP"], 2)
+
+    tv2_qo_dec = decimals_for_element(properties, REPORT_ELEMENTS["TV2"]["Qo"], 3)
+    tv2_v1_dec = decimals_for_element(properties, REPORT_ELEMENTS["TV2"]["V1"], 2)
+    tv2_t1_dec = decimals_for_element(properties, REPORT_ELEMENTS["TV2"]["t1"], 2)
+    tv2_bnp_dec = decimals_for_element(properties, REPORT_ELEMENTS["TV2"]["BNP"], 2)
+    tv2_v3_dec = decimals_for_element(properties, REPORT_ELEMENTS["TV2"]["V3"], 2)
 
     t_unit = unit_for(properties, "t", "°C")
     m_unit = unit_for(properties, "M", "т")
@@ -557,8 +613,9 @@ def create_pdf(
         daily_rows.append(values)
 
         decimals = [
-            qo1_dec, m1_dec, m2_dec, t_dec, t_dec, t_dec,
-            p1_dec, p2_dec, qo2_dec, tv2_v1_dec, t_dec, bnp_dec,
+            tv1_qo_dec, tv1_m1_dec, tv1_m2_dec, tv1_t1_dec, tv1_t2_dec,
+            tv1_dt_dec, tv1_p1_dec, tv1_p2_dec, tv2_qo_dec, tv2_v1_dec,
+            tv2_t1_dec, tv2_bnp_dec,
         ]
         table_data.append(
             [paragraph(current_date.strftime("%d.%m.%Y"), cell_style)]
@@ -566,7 +623,7 @@ def create_pdf(
             + [paragraph(
                 format_number(
                     value_from_record(row, REPORT_ELEMENTS["TV1"]["BNP"], active_elements),
-                    bnp_dec,
+                    tv1_bnp_dec,
                 ),
                 cell_style,
             )]
@@ -575,14 +632,14 @@ def create_pdf(
     # Totals.
     total_row = [paragraph("<b>Итого</b>", total_style)]
     total_row += [
-        paragraph(f"<b>{format_number(sum_values(r[0] for r in daily_rows), qo1_dec)}</b>", total_style),
-        paragraph(f"<b>{format_number(sum_values(r[1] for r in daily_rows), m1_dec)}</b>", total_style),
-        paragraph(f"<b>{format_number(sum_values(r[2] for r in daily_rows), m2_dec)}</b>", total_style),
+        paragraph(f"<b>{format_number(sum_values(r[0] for r in daily_rows), tv1_qo_dec)}</b>", total_style),
+        paragraph(f"<b>{format_number(sum_values(r[1] for r in daily_rows), tv1_m1_dec)}</b>", total_style),
+        paragraph(f"<b>{format_number(sum_values(r[2] for r in daily_rows), tv1_m2_dec)}</b>", total_style),
         "", "", "", "", "",
-        paragraph(f"<b>{format_number(sum_values(r[8] for r in daily_rows), qo2_dec)}</b>", total_style),
+        paragraph(f"<b>{format_number(sum_values(r[8] for r in daily_rows), tv2_qo_dec)}</b>", total_style),
         paragraph(f"<b>{format_number(sum_values(r[9] for r in daily_rows), tv2_v1_dec)}</b>", total_style),
         "",
-        paragraph(f"<b>{format_number(sum_values(r[11] for r in daily_rows), bnp_dec)}</b>", total_style),
+        paragraph(f"<b>{format_number(sum_values(r[11] for r in daily_rows), tv2_bnp_dec)}</b>", total_style),
     ]
     table_data.append(total_row)
     total_row_index = len(table_data) - 1
@@ -591,13 +648,13 @@ def create_pdf(
     average_row = [paragraph("<b>Среднее</b>", total_style)]
     average_row += [
         "", "", "",
-        paragraph(f"<b>{format_number(average_values(r[3] for r in daily_rows), t_dec)}</b>", total_style),
-        paragraph(f"<b>{format_number(average_values(r[4] for r in daily_rows), t_dec)}</b>", total_style),
-        paragraph(f"<b>{format_number(average_values(r[5] for r in daily_rows), t_dec)}</b>", total_style),
-        paragraph(f"<b>{format_number(average_values(r[6] for r in daily_rows), p1_dec)}</b>", total_style),
-        paragraph(f"<b>{format_number(average_values(r[7] for r in daily_rows), p2_dec)}</b>", total_style),
+        paragraph(f"<b>{format_number(average_values(r[3] for r in daily_rows), tv1_t1_dec)}</b>", total_style),
+        paragraph(f"<b>{format_number(average_values(r[4] for r in daily_rows), tv1_t2_dec)}</b>", total_style),
+        paragraph(f"<b>{format_number(average_values(r[5] for r in daily_rows), tv1_dt_dec)}</b>", total_style),
+        paragraph(f"<b>{format_number(average_values(r[6] for r in daily_rows), tv1_p1_dec)}</b>", total_style),
+        paragraph(f"<b>{format_number(average_values(r[7] for r in daily_rows), tv1_p2_dec)}</b>", total_style),
         "",
-        paragraph(f"<b>{format_number(average_values(r[10] for r in daily_rows), t_dec)}</b>", total_style),
+        paragraph(f"<b>{format_number(average_values(r[10] for r in daily_rows), tv2_t1_dec)}</b>", total_style),
         "", "",
     ]
     table_data.append(average_row)
@@ -642,14 +699,14 @@ def create_pdf(
         cold_rows.append([v3, bnp])
         cold_table_data.append([
             paragraph(current_date.strftime("%d.%m.%Y"), cell_style),
-            paragraph(format_number(v3, tv2_v1_dec), cell_style),
-            paragraph(format_number(bnp, bnp_dec), cell_style),
+            paragraph(format_number(v3, tv2_v3_dec), cell_style),
+            paragraph(format_number(bnp, tv2_bnp_dec), cell_style),
         ])
 
     cold_total_row = [
         paragraph("<b>Итого</b>", total_style),
-        paragraph(f"<b>{format_number(sum_values(r[0] for r in cold_rows), tv2_v1_dec)}</b>", total_style),
-        paragraph(f"<b>{format_number(sum_values(r[1] for r in cold_rows), bnp_dec)}</b>", total_style),
+        paragraph(f"<b>{format_number(sum_values(r[0] for r in cold_rows), tv2_v3_dec)}</b>", total_style),
+        paragraph(f"<b>{format_number(sum_values(r[1] for r in cold_rows), tv2_bnp_dec)}</b>", total_style),
     ]
     cold_table_data.append(cold_total_row)
     cold_total_row_index = len(cold_table_data) - 1
