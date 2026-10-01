@@ -2,44 +2,42 @@
 # -*- coding: utf-8 -*-
 
 """
-VKT-7 report/export from PostgreSQL.
+Генерация PDF-отчета ВКТ-7 непосредственно из PostgreSQL.
 
-Режимы:
+Используется только суточный архив:
+    vkt7.daily_archive
 
-1. PDF непосредственно из PostgreSQL:
+Метаданные устройства:
+    vkt7.devices
 
-    python vkt7_report_db.py pdf \
+Активные элементы:
+    vkt7.active_elements
+
+Свойства элементов:
+    vkt7.properties
+
+Пример:
+
+    python tools/vkt7_report_db.py \
         --db-url "postgresql://vkt7:vkt7@127.0.0.1:5432/vkt7" \
-        --device-id 4 \
-        --month 2026-09 \
+        --device-id 65 \
+        --from 2026-09-01 \
+        --to 2026-09-30 \
         --output report_2026-09.pdf
 
-2. Экспорт CSV, совместимый с vkt7_export:
-
-    python vkt7_report_db.py csv \
-        --db-url "postgresql://vkt7:vkt7@127.0.0.1:5432/vkt7" \
-        --device-id 4 \
-        --month 2026-09 \
-        --output-dir export
-
-3. PDF без указания месяца — последний полный месяц:
-
-    python vkt7_report_db.py pdf \
-        --db-url "postgresql://vkt7:vkt7@127.0.0.1:5432/vkt7" \
-        --device-id 4
+Дата --to включается в отчет.
 """
 
 from __future__ import annotations
 
 import argparse
-import calendar
 import json
 import logging
 import os
 import sys
 from dataclasses import dataclass
-from datetime import date, datetime
-from decimal import Decimal, InvalidOperation
+from datetime import date, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -53,10 +51,10 @@ from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
 from reportlab.platypus import (
     Paragraph,
+    PageBreak,
     SimpleDocTemplate,
     Table,
     TableStyle,
-    PageBreak,
 )
 
 
@@ -64,169 +62,161 @@ LOG = logging.getLogger("vkt7_report_db")
 
 
 # ============================================================================
-# ПАРАМЕТРЫ VKT-7
+# VKT-7: семантика адресов элементов
 # ============================================================================
+#
+# Эти адреса являются адресами элементов протокола ВКТ-7.
+#
+# ВАЖНО:
+#   active_elements говорит, какие адреса реально присутствуют у конкретного
+#   прибора.
+#
+#   properties содержит не имена этих элементов, а свойства вроде:
+#       t_dec
+#       V1_dec
+#       M1_dec
+#       P1_dec
+#       Qo1_dec
+#       t_unit
+#       V_unit
+#       M_unit
+#       P_unit
+#       Qo_unit
+#
+# Поэтому semantic mapping нужен только для определения смысла адреса.
+# Единицы и точность НЕ задаются здесь — они берутся из properties.
+#
+# Формат:
+#   address: (имя, контур)
+#
+# Контур:
+#   TV1
+#   TV2
+#
+ELEMENTS: Dict[int, Tuple[str, str]] = {
+    # TV1
+    0: ("t1", "TV1"),
+    1: ("t2", "TV1"),
+    2: ("t3", "TV1"),
+    3: ("V1", "TV1"),
+    4: ("V2", "TV1"),
+    5: ("V3", "TV1"),
+    6: ("M1", "TV1"),
+    7: ("M2", "TV1"),
+    8: ("M3", "TV1"),
+    9: ("P1", "TV1"),
+    10: ("P2", "TV1"),
+    11: ("Mg", "TV1"),
+    12: ("Qo", "TV1"),
+    13: ("Qg", "TV1"),
+    14: ("dt", "TV1"),
+    17: ("BNP", "TV1"),
+    18: ("VOC", "TV1"),
+    19: ("G1", "TV1"),
+    20: ("G2", "TV1"),
+    21: ("G3", "TV1"),
 
-# ID элементов соответствуют vkt7_export.py.
-PARAMETERS: Dict[int, Tuple[str, str, Optional[str]]] = {
-    # ТВ1
-    0: ("t1", "TV1", "t"),
-    1: ("t2", "TV1", "t"),
-    2: ("t3", "TV1", "t"),
-    3: ("V1", "TV1", "V1"),
-    4: ("V2", "TV1", "V1"),
-    5: ("V3", "TV1", "V1"),
-    6: ("M1", "TV1", "M1"),
-    7: ("M2", "TV1", "M1"),
-    8: ("M3", "TV1", "M1"),
-    9: ("P1", "TV1", "P"),
-    10: ("P2", "TV1", "P"),
-    11: ("Mg", "TV1", "M1"),
-    12: ("Qo", "TV1", "Q1"),
-    13: ("Qg", "TV1", "Q1"),
-    14: ("dt", "TV1", "t"),
-    15: ("tx", "COMMON", "t"),
-    16: ("ta", "COMMON", "t"),
-    17: ("BNP", "TV1", None),
-    18: ("VOC", "TV1", None),
-    19: ("G1", "TV1", None),
-    20: ("G2", "TV1", None),
-    21: ("G3", "TV1", None),
-
-    # ТВ2
-    22: ("t1", "TV2", "t"),
-    23: ("t2", "TV2", "t"),
-    24: ("t3", "TV2", "t"),
-    25: ("V1", "TV2", "V2"),
-    26: ("V2", "TV2", "V2"),
-    27: ("V3", "TV2", "V2"),
-    28: ("M1", "TV2", "M2"),
-    29: ("M2", "TV2", "M2"),
-    30: ("M3", "TV2", "M2"),
-    31: ("P1", "TV2", "P"),
-    32: ("P2", "TV2", "P"),
-    33: ("Mg", "TV2", "M2"),
-    34: ("Qo", "TV2", "Q2"),
-    35: ("Qg", "TV2", "Q2"),
-    36: ("dt", "TV2", "t"),
-    37: ("tx", "TV2", "t"),
-    38: ("ta", "TV2", "t"),
-    39: ("BNP", "TV2", None),
-    40: ("VOC", "TV2", None),
-    41: ("G1", "TV2", None),
-    42: ("G2", "TV2", None),
-    43: ("G3", "TV2", None),
-
-    # Нештатные ситуации
-    77: ("NS_present", "TV1", "char"),
-    78: ("NS_present", "TV2", "char"),
-    79: ("NS_duration", "TV1", "array10"),
-    80: ("NS_duration", "TV2", "array10"),
-
-    # COMMON
-    81: ("DI", "COMMON", None),
-    82: ("P3", "COMMON", "P"),
+    # TV2
+    22: ("t1", "TV2"),
+    23: ("t2", "TV2"),
+    24: ("t3", "TV2"),
+    25: ("V1", "TV2"),
+    26: ("V2", "TV2"),
+    27: ("V3", "TV2"),
+    28: ("M1", "TV2"),
+    29: ("M2", "TV2"),
+    30: ("M3", "TV2"),
+    31: ("P1", "TV2"),
+    32: ("P2", "TV2"),
+    33: ("Mg", "TV2"),
+    34: ("Qo", "TV2"),
+    35: ("Qg", "TV2"),
+    36: ("dt", "TV2"),
+    39: ("BNP", "TV2"),
+    40: ("VOC", "TV2"),
+    41: ("G1", "TV2"),
+    42: ("G2", "TV2"),
+    43: ("G3", "TV2"),
 }
 
 
-ID_BY_NAME: Dict[str, int] = {}
-
-for _id, (_name, _circuit, _scale) in PARAMETERS.items():
-    # Для ТВ1/ТВ2 одинаковые имена допустимы.
-    # Для COMMON имя уникально.
-    ID_BY_NAME[f"{_circuit}:{_name}"] = _id
-
-
-# Поля, которые реально используются старым PDF-шаблоном.
-TV1_REPORT_FIELDS = [
-    "Qo",
-    "M1",
-    "M2",
-    "t1",
-    "t2",
-    "dt",
-    "P1",
-    "P2",
-]
-
-TV2_REPORT_FIELDS = [
-    "Qo",
-    "V1",
-    "t1",
-    "BNP",
-]
-
-
-# ============================================================================
-# УТИЛИТЫ ДАТ
-# ============================================================================
-
-def parse_month(value: Optional[str]) -> Tuple[date, date]:
-    """
-    Возвращает [first_day, first_day_of_next_month].
-
-    Если month=None, используется предыдущий полный календарный месяц.
-    """
-    if value:
-        try:
-            year, month = map(int, value.split("-"))
-            if not 1 <= month <= 12:
-                raise ValueError
-            first = date(year, month, 1)
-        except ValueError:
-            raise SystemExit(
-                f"Неверный месяц: {value!r}. Используйте YYYY-MM."
-            )
-    else:
-        today = date.today()
-
-        if today.month == 1:
-            year = today.year - 1
-            month = 12
-        else:
-            year = today.year
-            month = today.month - 1
-
-        first = date(year, month, 1)
-
-    if first.month == 12:
-        next_month = date(first.year + 1, 1, 1)
-    else:
-        next_month = date(first.year, first.month + 1, 1)
-
-    return first, next_month
-
-
-def month_title(first_day: date) -> str:
-    months = [
-        "",
-        "январь",
-        "февраль",
-        "март",
-        "апрель",
-        "май",
-        "июнь",
-        "июль",
-        "август",
-        "сентябрь",
-        "октябрь",
-        "ноябрь",
-        "декабрь",
-    ]
-    return f"{months[first_day.month]} {first_day.year}"
+# Элементы, используемые непосредственно в отчетной таблице.
+#
+# Слева:
+#   адрес
+#
+# Справа:
+#   заголовок PDF
+#
+# Семантика элемента берется из ELEMENTS, а unit/dec — из properties.
+REPORT_ELEMENTS = {
+    "TV1": {
+        "Qo": 12,
+        "M1": 6,
+        "M2": 7,
+        "t1": 0,
+        "t2": 1,
+        "dt": 14,
+        "P1": 9,
+        "P2": 10,
+        "BNP": 17,
+    },
+    "TV2": {
+        "Qo": 34,
+        "V1": 25,
+        "t1": 22,
+        "BNP": 39,
+        "V3": 27,
+    },
+}
 
 
 # ============================================================================
-# JSON / VKT-7 VALUES
+# Модели данных
+# ============================================================================
+
+@dataclass
+class ElementInfo:
+    device_id: int
+    address: int
+    size: int
+
+    @property
+    def semantic(self) -> Optional[Tuple[str, str]]:
+        return ELEMENTS.get(self.address)
+
+    @property
+    def name(self) -> Optional[str]:
+        item = self.semantic
+        return item[0] if item else None
+
+    @property
+    def circuit(self) -> Optional[str]:
+        item = self.semantic
+        return item[1] if item else None
+
+
+@dataclass
+class PropertyInfo:
+    device_id: int
+    address: int
+    name: str
+    value_text: Optional[str]
+    numeric_value: Optional[float]
+    raw: Any
+
+    @property
+    def value(self) -> Any:
+        if self.numeric_value is not None:
+            return self.numeric_value
+        return self.value_text
+
+
+# ============================================================================
+# Общие функции
 # ============================================================================
 
 def normalize_json(value: Any) -> Any:
-    """
-    PostgreSQL JSONB обычно приходит уже как dict/list.
-
-    Функция дополнительно обрабатывает случай, когда драйвер/старый
-    вариант БД вернул JSON в виде строки.
-    """
     if value is None:
         return None
 
@@ -237,134 +227,17 @@ def normalize_json(value: Any) -> Any:
         return float(value)
 
     if isinstance(value, str):
-        s = value.strip()
+        value = value.strip()
 
-        if not s:
+        if not value:
             return None
 
         try:
-            return json.loads(s)
-        except Exception:
+            return json.loads(value)
+        except (TypeError, ValueError, json.JSONDecodeError):
             return value
 
     return value
-
-
-def json_get(obj: Any, key: str) -> Any:
-    """
-    Безопасное получение значения из JSON.
-
-    Поддерживаются несколько вариантов хранения:
-      {"12": 123.45}
-      {12: 123.45}
-      {"Qo": 123.45}
-      {"TV1": {"Qo": 123.45}}
-      {"TV1:Qo": 123.45}
-
-    Это специально сделано для совместимости с текущей JSONB-моделью.
-    """
-
-    obj = normalize_json(obj)
-
-    if not isinstance(obj, dict):
-        return None
-
-    # Прямой ключ.
-    if key in obj:
-        return obj[key]
-
-    # Строковое/числовое представление.
-    try:
-        if str(key) in obj:
-            return obj[str(key)]
-    except Exception:
-        pass
-
-    return None
-
-
-def extract_element(values: Any, element_id: int) -> Any:
-    """
-    Получение значения элемента VKT-7 из JSONB.
-
-    Основной формат vkt7d ожидается как:
-        {"12": value}
-
-    Дополнительно поддерживаем:
-        {"Qo": value}
-        {"TV1": {"Qo": value}}
-        {"TV1:Qo": value}
-    """
-
-    values = normalize_json(values)
-
-    if not isinstance(values, dict):
-        return None
-
-    name, circuit, _scale = PARAMETERS.get(
-        element_id,
-        (None, None, None),
-    )
-
-    candidates = [
-        str(element_id),
-        element_id,
-    ]
-
-    if name:
-        candidates.extend([
-            name,
-            f"{circuit}:{name}",
-            f"{circuit}.{name}",
-        ])
-
-    for candidate in candidates:
-        if candidate in values:
-            item = values[candidate]
-
-            # Некоторые реализации могут хранить:
-            # {"12": {"value": 123, ...}}
-            if isinstance(item, dict):
-                for k in ("value", "raw_value", "numeric_value"):
-                    if k in item:
-                        return item[k]
-
-            return item
-
-    # Вложенный TV1/TV2.
-    if circuit and circuit in values:
-        nested = values[circuit]
-
-        if isinstance(nested, dict):
-            for candidate in candidates:
-                if candidate in nested:
-                    item = nested[candidate]
-
-                    if isinstance(item, dict):
-                        for k in ("value", "raw_value", "numeric_value"):
-                            if k in item:
-                                return item[k]
-
-                    return item
-
-    return None
-
-
-def element_id_for(circuit: str, name: str) -> Optional[int]:
-    return ID_BY_NAME.get(f"{circuit}:{name}")
-
-
-def value_from_record(
-    record: Dict[str, Any],
-    circuit: str,
-    name: str,
-) -> Any:
-    element_id = element_id_for(circuit, name)
-
-    if element_id is None:
-        return None
-
-    return extract_element(record.get("values"), element_id)
 
 
 def to_number(value: Any) -> Optional[float]:
@@ -381,58 +254,123 @@ def to_number(value: Any) -> Optional[float]:
         return float(value)
 
     if isinstance(value, str):
-        s = value.strip()
+        value = value.strip()
 
-        if not s:
+        if not value:
             return None
 
-        # Допускаем русскую десятичную запятую.
-        s = s.replace(",", ".")
+        value = value.replace(",", ".")
 
         try:
-            return float(s)
+            return float(value)
         except ValueError:
             return None
 
     if isinstance(value, dict):
-        for key in ("value", "numeric_value", "raw_value"):
+        for key in (
+            "value",
+            "numeric_value",
+            "raw_value",
+        ):
             if key in value:
                 return to_number(value[key])
 
     return None
 
 
-def format_csv_value(value: Any) -> str:
-    """
-    Формат максимально близкий к vkt7_export.py:
-    float -> .15g
-    list -> элементы через ;
-    None -> пустая строка
-    """
+def format_number(
+    value: Any,
+    decimals: int = 3,
+) -> str:
+    number = to_number(value)
 
-    if value is None:
+    if number is None:
         return ""
 
-    if isinstance(value, float):
-        return format(value, ".15g")
+    if abs(number) < 0.5 * 10 ** (-decimals):
+        number = 0.0
 
-    if isinstance(value, Decimal):
-        return format(float(value), ".15g")
+    return f"{number:.{decimals}f}"
 
-    if isinstance(value, list):
-        return ";".join(str(x) for x in value)
 
-    return str(value)
+def sum_values(
+    values: Iterable[Any],
+) -> Optional[float]:
+    result = []
+
+    for value in values:
+        number = to_number(value)
+
+        if number is not None:
+            result.append(number)
+
+    if not result:
+        return None
+
+    return sum(result)
+
+
+def average_values(
+    values: Iterable[Any],
+) -> Optional[float]:
+    result = []
+
+    for value in values:
+        number = to_number(value)
+
+        if number is not None:
+            result.append(number)
+
+    if not result:
+        return None
+
+    return sum(result) / len(result)
+
+
+def paragraph(
+    value: Any,
+    style: ParagraphStyle,
+) -> Paragraph:
+    if value is None:
+        value = ""
+
+    return Paragraph(
+        str(value),
+        style,
+    )
 
 
 # ============================================================================
-# POSTGRESQL
+# Даты
+# ============================================================================
+
+def parse_date(value: str, argument_name: str) -> date:
+    try:
+        return date.fromisoformat(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            f"{argument_name}: ожидается дата YYYY-MM-DD, "
+            f"получено {value!r}"
+        ) from exc
+
+
+def validate_period(
+    first_day: date,
+    last_day: date,
+) -> None:
+    if last_day < first_day:
+        raise ValueError(
+            f"Дата окончания периода ({last_day}) "
+            f"раньше даты начала ({first_day})."
+        )
+
+
+# ============================================================================
+# PostgreSQL
 # ============================================================================
 
 def connect_db(db_url: str):
-    conn = psycopg2.connect(db_url)
-    conn.autocommit = False
-    return conn
+    return psycopg2.connect(db_url)
 
 
 def get_device(
@@ -462,27 +400,97 @@ def get_device(
         cur.execute(sql, (device_id,))
         row = cur.fetchone()
 
-    if not row:
+    if row is None:
         raise RuntimeError(
-            f"Устройство device_id={device_id} не найдено "
-            f"в vkt7.devices."
+            f"Устройство device_id={device_id} "
+            f"не найдено в vkt7.devices."
         )
 
     return dict(row)
+
+
+def get_active_elements(
+    conn,
+    device_id: int,
+) -> Dict[int, ElementInfo]:
+    sql = """
+        SELECT
+            device_id,
+            element_address,
+            element_size
+        FROM vkt7.active_elements
+        WHERE device_id = %s
+        ORDER BY element_address
+    """
+
+    result: Dict[int, ElementInfo] = {}
+
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(sql, (device_id,))
+
+        for row in cur.fetchall():
+            item = ElementInfo(
+                device_id=int(row["device_id"]),
+                address=int(row["element_address"]),
+                size=int(row["element_size"]),
+            )
+
+            result[item.address] = item
+
+    return result
+
+
+def get_properties(
+    conn,
+    device_id: int,
+) -> Dict[str, PropertyInfo]:
+    sql = """
+        SELECT
+            device_id,
+            element_address,
+            name,
+            value_text,
+            numeric_value,
+            raw,
+            updated_at
+        FROM vkt7.properties
+        WHERE device_id = %s
+        ORDER BY element_address
+    """
+
+    result: Dict[str, PropertyInfo] = {}
+
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(sql, (device_id,))
+
+        for row in cur.fetchall():
+            item = PropertyInfo(
+                device_id=int(row["device_id"]),
+                address=int(row["element_address"]),
+                name=str(row["name"]),
+                value_text=row["value_text"],
+                numeric_value=to_number(row["numeric_value"]),
+                raw=row["raw"],
+            )
+
+            result[item.name] = item
+
+    return result
 
 
 def get_daily_rows(
     conn,
     device_id: int,
     first_day: date,
-    next_month: date,
+    last_day: date,
 ) -> List[Dict[str, Any]]:
     """
-    Получает весь суточный архив за календарный месяц.
+    Получает ТОЛЬКО суточный архив.
 
-    LEFT/INNER JOIN здесь не нужен: в одной записи daily_archive
-    могут присутствовать элементы ТВ1 и ТВ2.
+    Верхняя граница исключающая, поэтому дата --to включается.
     """
+
+    next_day = last_day + timedelta(days=1)
 
     sql = """
         SELECT
@@ -509,255 +517,199 @@ def get_daily_rows(
             (
                 device_id,
                 first_day,
-                next_month,
+                next_day,
             ),
         )
 
-        return [dict(row) for row in cur.fetchall()]
+        return [
+            dict(row)
+            for row in cur.fetchall()
+        ]
 
 
 # ============================================================================
-# ПРЕОБРАЗОВАНИЕ БД -> CSV RECORDS
+# Работа с properties
 # ============================================================================
 
-def db_row_to_tv_record(
-    row: Dict[str, Any],
-    circuit: str,
-) -> Dict[str, Any]:
-    """
-    Делает логическую запись в формате старого CSV exporter.
+def property_number(
+    properties: Dict[str, PropertyInfo],
+    name: str,
+    default: Optional[float] = None,
+) -> Optional[float]:
+    item = properties.get(name)
 
-    Для ТВ1 и ТВ2 используется полный набор PARAMETERS.
-    """
+    if item is None:
+        return default
 
-    result: Dict[str, Any] = {
-        "date": row["archive_date"].isoformat()
-        if isinstance(row["archive_date"], date)
-        else str(row["archive_date"])
-    }
+    if item.numeric_value is not None:
+        return item.numeric_value
 
-    for element_id, (
-        name,
-        element_circuit,
-        _scale,
-    ) in PARAMETERS.items():
-
-        if element_circuit != circuit:
-            continue
-
-        result[name] = extract_element(
-            row.get("values"),
-            element_id,
-        )
-
-    return result
+    return to_number(item.value_text) or default
 
 
-def build_records(
-    rows: Iterable[Dict[str, Any]],
-) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+def property_text(
+    properties: Dict[str, PropertyInfo],
+    name: str,
+    default: str = "",
+) -> str:
+    item = properties.get(name)
 
-    tv1_records = []
-    tv2_records = []
+    if item is None:
+        return default
 
-    for row in rows:
-        tv1_records.append(
-            db_row_to_tv_record(row, "TV1")
-        )
+    if item.value_text is not None:
+        return str(item.value_text)
 
-        tv2_records.append(
-            db_row_to_tv_record(row, "TV2")
-        )
+    if item.numeric_value is not None:
+        return str(item.numeric_value)
 
-    return tv1_records, tv2_records
-
-
-# ============================================================================
-# CSV
-# ============================================================================
-
-CSV_COLUMNS = [
-    "date",
-
-    "t1",
-    "t2",
-    "t3",
-
-    "V1",
-    "V2",
-    "V3",
-
-    "M1",
-    "M2",
-    "M3",
-
-    "P1",
-    "P2",
-
-    "Mg",
-    "Qo",
-    "Qg",
-    "dt",
-    "tx",
-    "ta",
-    "BNP",
-    "VOC",
-    "G1",
-    "G2",
-    "G3",
-
-    "NS_present",
-    "NS_duration",
-
-    "DI",
-    "P3",
-]
+    return default
 
 
-def write_csv(
-    records: List[Dict[str, Any]],
-    output: Path,
-) -> None:
-
-    import csv
-
-    output.parent.mkdir(
-        parents=True,
-        exist_ok=True,
+def decimals_for(
+    properties: Dict[str, PropertyInfo],
+    prefix: str,
+    default: int = 3,
+) -> int:
+    value = property_number(
+        properties,
+        f"{prefix}_dec",
     )
-
-    with output.open(
-        "w",
-        encoding="utf-8-sig",
-        newline="",
-    ) as f:
-
-        writer = csv.DictWriter(
-            f,
-            fieldnames=CSV_COLUMNS,
-            delimiter=";",
-            extrasaction="ignore",
-        )
-
-        writer.writeheader()
-
-        for record in records:
-            writer.writerow({
-                key: format_csv_value(
-                    record.get(key)
-                )
-                for key in CSV_COLUMNS
-            })
-
-
-def export_csv(
-    conn,
-    device_id: int,
-    first_day: date,
-    next_month: date,
-    output_dir: Path,
-) -> None:
-
-    rows = get_daily_rows(
-        conn,
-        device_id,
-        first_day,
-        next_month,
-    )
-
-    tv1, tv2 = build_records(rows)
-
-    output_dir.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
-    write_csv(
-        tv1,
-        output_dir / "tv1.csv",
-    )
-
-    write_csv(
-        tv2,
-        output_dir / "tv2.csv",
-    )
-
-    LOG.info(
-        "Экспортировано: %d суточных записей",
-        len(rows),
-    )
-
-    LOG.info(
-        "TV1: %s",
-        output_dir / "tv1.csv",
-    )
-
-    LOG.info(
-        "TV2: %s",
-        output_dir / "tv2.csv",
-    )
-
-
-# ============================================================================
-# PDF
-# ============================================================================
-
-def format_number(value: Any, decimals: int = 3) -> str:
-    number = to_number(value)
-
-    if number is None:
-        return ""
-
-    # Не показываем -0.000.
-    if abs(number) < 0.5 * 10 ** (-decimals):
-        number = 0.0
-
-    return f"{number:.{decimals}f}"
-
-
-def sum_values(values: Iterable[Any]) -> Optional[float]:
-    numbers = []
-
-    for value in values:
-        number = to_number(value)
-
-        if number is not None:
-            numbers.append(number)
-
-    if not numbers:
-        return None
-
-    return sum(numbers)
-
-
-def average_values(values: Iterable[Any]) -> Optional[float]:
-    numbers = []
-
-    for value in values:
-        number = to_number(value)
-
-        if number is not None:
-            numbers.append(number)
-
-    if not numbers:
-        return None
-
-    return sum(numbers) / len(numbers)
-
-
-def paragraph(
-    value: Any,
-    style: ParagraphStyle,
-) -> Paragraph:
 
     if value is None:
-        value = ""
+        return default
 
-    return Paragraph(
-        str(value),
-        style,
+    return max(0, int(value))
+
+
+def unit_for(
+    properties: Dict[str, PropertyInfo],
+    prefix: str,
+    default: str,
+) -> str:
+    return property_text(
+        properties,
+        f"{prefix}_unit",
+        default,
     )
 
+
+# ============================================================================
+# Извлечение значения элемента из daily_archive.values
+# ============================================================================
+
+def extract_element(
+    values: Any,
+    element_address: int,
+) -> Any:
+    """
+    Поддерживает варианты JSONB:
+
+        {"12": 123.45}
+
+        {"12": {"value": 123.45}}
+
+        {"Qo": 123.45}
+
+        {"TV1": {"Qo": 123.45}}
+
+        {"TV1:Qo": 123.45}
+    """
+
+    values = normalize_json(values)
+
+    if not isinstance(values, dict):
+        return None
+
+    name_circuit = ELEMENTS.get(element_address)
+
+    candidates: List[Any] = [
+        str(element_address),
+        element_address,
+    ]
+
+    if name_circuit:
+        name, circuit = name_circuit
+
+        candidates.extend([
+            name,
+            f"{circuit}:{name}",
+            f"{circuit}.{name}",
+        ])
+
+    for candidate in candidates:
+        if candidate not in values:
+            continue
+
+        item = values[candidate]
+
+        if isinstance(item, dict):
+            for key in (
+                "value",
+                "numeric_value",
+                "raw_value",
+            ):
+                if key in item:
+                    return item[key]
+
+        return item
+
+    if name_circuit:
+        name, circuit = name_circuit
+
+        nested = values.get(circuit)
+
+        if isinstance(nested, dict):
+            for candidate in (
+                name,
+                f"{circuit}:{name}",
+                f"{circuit}.{name}",
+                str(element_address),
+                element_address,
+            ):
+                if candidate not in nested:
+                    continue
+
+                item = nested[candidate]
+
+                if isinstance(item, dict):
+                    for key in (
+                        "value",
+                        "numeric_value",
+                        "raw_value",
+                    ):
+                        if key in item:
+                            return item[key]
+
+                return item
+
+    return None
+
+
+def value_from_record(
+    row: Dict[str, Any],
+    element_address: int,
+    active_elements: Dict[int, ElementInfo],
+) -> Any:
+    """
+    Если элемент отсутствует в active_elements, значение не извлекаем.
+
+    Это важно: отчет не должен показывать параметр как существующий,
+    если конкретный прибор его не объявил.
+    """
+
+    if element_address not in active_elements:
+        return None
+
+    return extract_element(
+        row.get("values"),
+        element_address,
+    )
+
+
+# ============================================================================
+# Шрифт
+# ============================================================================
 
 def find_font() -> str:
     """
@@ -765,10 +717,10 @@ def find_font() -> str:
 
     Приоритет:
       1. DejaVuSans.ttf рядом со скриптом
-      2. системные DejaVu Sans
+      2. системный DejaVu Sans
       3. Liberation Sans
 
-    Если шрифт не найден — Helvetica.
+    Если ничего нет — Helvetica.
     """
 
     from reportlab.pdfbase import pdfmetrics
@@ -779,8 +731,15 @@ def find_font() -> str:
     candidates = [
         script_dir / "DejaVuSans.ttf",
 
-        Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
-        Path("/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed.ttf"),
+        Path(
+            "/usr/share/fonts/truetype/dejavu/"
+            "DejaVuSans.ttf"
+        ),
+
+        Path(
+            "/usr/share/fonts/truetype/dejavu/"
+            "DejaVuSansCondensed.ttf"
+        ),
 
         Path(
             "/usr/share/fonts/truetype/liberation2/"
@@ -822,22 +781,28 @@ def find_font() -> str:
     return "Helvetica"
 
 
+# ============================================================================
+# PDF
+# ============================================================================
+
 def create_pdf(
     rows: List[Dict[str, Any]],
     device: Dict[str, Any],
+    active_elements: Dict[int, ElementInfo],
+    properties: Dict[str, PropertyInfo],
     first_day: date,
-    next_month: date,
+    last_day: date,
     output: Path,
 ) -> None:
 
-    FONT_NAME = find_font()
+    font_name = find_font()
 
     styles = getSampleStyleSheet()
 
     title_style = ParagraphStyle(
         "VKTTitle",
         parent=styles["Title"],
-        fontName=FONT_NAME,
+        fontName=font_name,
         fontSize=14,
         leading=16,
         alignment=TA_CENTER,
@@ -847,7 +812,7 @@ def create_pdf(
     header_style = ParagraphStyle(
         "VKTHeader",
         parent=styles["Normal"],
-        fontName=FONT_NAME,
+        fontName=font_name,
         fontSize=7,
         leading=8,
         alignment=TA_CENTER,
@@ -856,7 +821,7 @@ def create_pdf(
     cell_style = ParagraphStyle(
         "VKTCell",
         parent=styles["Normal"],
-        fontName=FONT_NAME,
+        fontName=font_name,
         fontSize=7,
         leading=8,
         alignment=TA_CENTER,
@@ -865,7 +830,7 @@ def create_pdf(
     total_style = ParagraphStyle(
         "VKTTotal",
         parent=cell_style,
-        fontName=FONT_NAME,
+        fontName=font_name,
         fontSize=7,
         leading=8,
         alignment=TA_CENTER,
@@ -879,32 +844,134 @@ def create_pdf(
         topMargin=8 * mm,
         bottomMargin=8 * mm,
         title="Архив ВКТ-7",
-        author="Python / PostgreSQL",
+        author="vkt7_report_db.py",
     )
 
     elements = []
 
     # ------------------------------------------------------------------------
-    # Мапы по датам
+    # Даты
     # ------------------------------------------------------------------------
 
     rows_by_date: Dict[date, Dict[str, Any]] = {}
 
     for row in rows:
-        d = row["archive_date"]
+        archive_date = row["archive_date"]
 
-        if isinstance(d, datetime):
-            d = d.date()
+        if isinstance(archive_date, datetime):
+            archive_date = archive_date.date()
 
-        if isinstance(d, str):
-            d = date.fromisoformat(d)
+        elif isinstance(archive_date, str):
+            archive_date = date.fromisoformat(
+                archive_date[:10]
+            )
 
-        rows_by_date[d] = row
+        rows_by_date[archive_date] = row
 
     all_dates = sorted(rows_by_date)
 
     # ------------------------------------------------------------------------
-    # СТРАНИЦА 1
+    # Свойства точности
+    # ------------------------------------------------------------------------
+
+    tv1_t_dec = decimals_for(
+        properties,
+        "t",
+        2,
+    )
+
+    tv1_m1_dec = decimals_for(
+        properties,
+        "M1",
+        2,
+    )
+
+    tv1_m2_dec = decimals_for(
+        properties,
+        "M2",
+        2,
+    )
+
+    tv1_p1_dec = decimals_for(
+        properties,
+        "P1",
+        2,
+    )
+
+    tv1_p2_dec = decimals_for(
+        properties,
+        "P2",
+        2,
+    )
+
+    tv1_qo_dec = decimals_for(
+        properties,
+        "Qo1",
+        3,
+    )
+
+    tv2_t_dec = tv1_t_dec
+
+    tv2_v1_dec = decimals_for(
+        properties,
+        "V1",
+        2,
+    )
+
+    tv2_qo_dec = decimals_for(
+        properties,
+        "Qo2",
+        3,
+    )
+
+    tv2_bnp_dec = decimals_for(
+        properties,
+        "BNP",
+        2,
+    )
+
+    # ------------------------------------------------------------------------
+    # Единицы
+    # ------------------------------------------------------------------------
+
+    t_unit = unit_for(
+        properties,
+        "t",
+        "°C",
+    )
+
+    m_unit = unit_for(
+        properties,
+        "M",
+        "т",
+    )
+
+    p_unit = unit_for(
+        properties,
+        "P",
+        "кг/см²",
+    )
+
+    qo_unit = unit_for(
+        properties,
+        "Qo",
+        "Гкал",
+    )
+
+    v_unit = unit_for(
+        properties,
+        "V",
+        "м³",
+    )
+
+    bnp_unit = unit_for(
+        properties,
+        "BNP",
+        "ч",
+    )
+
+    # ------------------------------------------------------------------------
+    # Заголовок
     # ------------------------------------------------------------------------
 
     elements.append(
@@ -916,7 +983,6 @@ def create_pdf(
 
     table_data = []
 
-    # Верхний уровень.
     table_data.append([
         paragraph(
             "<b>Отчет о суточных параметрах "
@@ -937,7 +1003,6 @@ def create_pdf(
         "",
     ])
 
-    # Средний уровень.
     table_data.append([
         paragraph("Дата", header_style),
 
@@ -960,77 +1025,190 @@ def create_pdf(
         ),
     ])
 
-    # Нижний уровень.
     table_data.append([
         "",
 
         paragraph(
-            "Qотопления, Гкал",
+            f"Qотопления, {qo_unit}",
             header_style,
         ),
-        paragraph("Mпод, т", header_style),
-        paragraph("Mобр, т", header_style),
-        paragraph("Tпод, °C", header_style),
-        paragraph("Tобр, °C", header_style),
-        paragraph("ΔT, °C", header_style),
-        paragraph("Pпод, кг/см²", header_style),
-        paragraph("Pобр, кг/см²", header_style),
 
-        paragraph("Qгвс, Гкал", header_style),
-        paragraph("Mгвс, м³", header_style),
-        paragraph("Tгвс, °C", header_style),
+        paragraph(
+            f"Mпод, {m_unit}",
+            header_style,
+        ),
+
+        paragraph(
+            f"Mобр, {m_unit}",
+            header_style,
+        ),
+
+        paragraph(
+            f"Tпод, {t_unit}",
+            header_style,
+        ),
+
+        paragraph(
+            f"Tобр, {t_unit}",
+            header_style,
+        ),
+
+        paragraph(
+            f"ΔT, {t_unit}",
+            header_style,
+        ),
+
+        paragraph(
+            f"Pпод, {p_unit}",
+            header_style,
+        ),
+
+        paragraph(
+            f"Pобр, {p_unit}",
+            header_style,
+        ),
+
+        paragraph(
+            f"Qгвс, {qo_unit}",
+            header_style,
+        ),
+
+        paragraph(
+            f"Mгвс, {v_unit}",
+            header_style,
+        ),
+
+        paragraph(
+            f"Tгвс, {t_unit}",
+            header_style,
+        ),
 
         "",
     ])
 
+    # ------------------------------------------------------------------------
+    # Суточные данные
+    # ------------------------------------------------------------------------
+
     daily_rows = []
 
-    for d in all_dates:
-        row = rows_by_date[d]
+    for current_date in all_dates:
+        row = rows_by_date[current_date]
 
         tv1 = [
-            value_from_record(row, "TV1", "Qo"),
-            value_from_record(row, "TV1", "M1"),
-            value_from_record(row, "TV1", "M2"),
-            value_from_record(row, "TV1", "t1"),
-            value_from_record(row, "TV1", "t2"),
-            value_from_record(row, "TV1", "dt"),
-            value_from_record(row, "TV1", "P1"),
-            value_from_record(row, "TV1", "P2"),
+            value_from_record(
+                row,
+                REPORT_ELEMENTS["TV1"]["Qo"],
+                active_elements,
+            ),
+
+            value_from_record(
+                row,
+                REPORT_ELEMENTS["TV1"]["M1"],
+                active_elements,
+            ),
+
+            value_from_record(
+                row,
+                REPORT_ELEMENTS["TV1"]["M2"],
+                active_elements,
+            ),
+
+            value_from_record(
+                row,
+                REPORT_ELEMENTS["TV1"]["t1"],
+                active_elements,
+            ),
+
+            value_from_record(
+                row,
+                REPORT_ELEMENTS["TV1"]["t2"],
+                active_elements,
+            ),
+
+            value_from_record(
+                row,
+                REPORT_ELEMENTS["TV1"]["dt"],
+                active_elements,
+            ),
+
+            value_from_record(
+                row,
+                REPORT_ELEMENTS["TV1"]["P1"],
+                active_elements,
+            ),
+
+            value_from_record(
+                row,
+                REPORT_ELEMENTS["TV1"]["P2"],
+                active_elements,
+            ),
         ]
 
         tv2 = [
-            value_from_record(row, "TV2", "Qo"),
-            value_from_record(row, "TV2", "V1"),
-            value_from_record(row, "TV2", "t1"),
-            value_from_record(row, "TV2", "BNP"),
+            value_from_record(
+                row,
+                REPORT_ELEMENTS["TV2"]["Qo"],
+                active_elements,
+            ),
+
+            value_from_record(
+                row,
+                REPORT_ELEMENTS["TV2"]["V1"],
+                active_elements,
+            ),
+
+            value_from_record(
+                row,
+                REPORT_ELEMENTS["TV2"]["t1"],
+                active_elements,
+            ),
+
+            value_from_record(
+                row,
+                REPORT_ELEMENTS["TV2"]["BNP"],
+                active_elements,
+            ),
         ]
 
         row_values = tv1 + tv2
 
         daily_rows.append(row_values)
 
-        date_string = d.strftime("%d.%m.%Y")
-
         table_data.append([
             paragraph(
-                date_string,
+                current_date.strftime("%d.%m.%Y"),
                 cell_style,
             )
         ] + [
             paragraph(
-                format_number(value),
+                format_number(
+                    value,
+                    decimals=(
+                        tv1_qo_dec if index == 0 else
+                        tv1_m1_dec if index == 1 else
+                        tv1_m2_dec if index == 2 else
+                        tv1_t_dec if index in (3, 4, 5) else
+                        tv1_p1_dec if index == 6 else
+                        tv1_p2_dec if index == 7 else
+                        tv2_qo_dec if index == 8 else
+                        tv2_v1_dec if index == 9 else
+                        tv2_t_dec if index == 10 else
+                        tv2_bnp_dec
+                    ),
+                ),
                 cell_style,
             )
-            for value in row_values
+            for index, value in enumerate(row_values)
         ] + [
             paragraph(
                 format_number(
                     value_from_record(
                         row,
-                        "TV1",
-                        "BNP",
-                    )
+                        REPORT_ELEMENTS["TV1"]["BNP"],
+                        active_elements,
+                    ),
+                    decimals=tv2_bnp_dec,
                 ),
                 cell_style,
             )
@@ -1077,40 +1255,41 @@ def create_pdf(
         ),
 
         paragraph(
-            f"<b>{format_number(sum_heating_qo)}</b>",
+            f"<b>{format_number(sum_heating_qo, tv1_qo_dec)}</b>",
             total_style,
         ),
 
         paragraph(
-            f"<b>{format_number(sum_heating_m1)}</b>",
+            f"<b>{format_number(sum_heating_m1, tv1_m1_dec)}</b>",
             total_style,
         ),
 
         paragraph(
-            f"<b>{format_number(sum_heating_m2)}</b>",
-            total_style,
-        ),
-
-        paragraph("", total_style),
-        "",
-        "",
-        "",
-        "",
-
-        paragraph(
-            f"<b>{format_number(sum_hotwater_qo)}</b>",
-            total_style,
-        ),
-
-        paragraph(
-            f"<b>{format_number(sum_hotwater_v1)}</b>",
+            f"<b>{format_number(sum_heating_m2, tv1_m2_dec)}</b>",
             total_style,
         ),
 
         "",
+        "",
+        "",
+        "",
+
+        "",
 
         paragraph(
-            f"<b>{format_number(sum_hotwater_bnp)}</b>",
+            f"<b>{format_number(sum_hotwater_qo, tv2_qo_dec)}</b>",
+            total_style,
+        ),
+
+        paragraph(
+            f"<b>{format_number(sum_hotwater_v1, tv2_v1_dec)}</b>",
+            total_style,
+        ),
+
+        "",
+
+        paragraph(
+            f"<b>{format_number(sum_hotwater_bnp, tv2_bnp_dec)}</b>",
             total_style,
         ),
     ]
@@ -1164,38 +1343,38 @@ def create_pdf(
         "",
 
         paragraph(
-            f"<b>{format_number(avg_heating_t1)}</b>",
+            f"<b>{format_number(avg_heating_t1, tv1_t_dec)}</b>",
             total_style,
         ),
 
         paragraph(
-            f"<b>{format_number(avg_heating_t2)}</b>",
+            f"<b>{format_number(avg_heating_t2, tv1_t_dec)}</b>",
             total_style,
         ),
 
         paragraph(
-            f"<b>{format_number(avg_heating_dt)}</b>",
+            f"<b>{format_number(avg_heating_dt, tv1_t_dec)}</b>",
             total_style,
         ),
 
         paragraph(
-            f"<b>{format_number(avg_heating_p1)}</b>",
+            f"<b>{format_number(avg_heating_p1, tv1_p1_dec)}</b>",
             total_style,
         ),
 
         paragraph(
-            f"<b>{format_number(avg_heating_p2)}</b>",
+            f"<b>{format_number(avg_heating_p2, tv1_p2_dec)}</b>",
             total_style,
         ),
 
         "",
 
-        "",
-
         paragraph(
-            f"<b>{format_number(avg_hotwater_t1)}</b>",
+            f"<b>{format_number(avg_hotwater_t1, tv2_t_dec)}</b>",
             total_style,
         ),
+
+        "",
 
         "",
     ]
@@ -1205,7 +1384,7 @@ def create_pdf(
     average_row_index = len(table_data) - 1
 
     # ------------------------------------------------------------------------
-    # Ширины таблицы
+    # Таблица
     # ------------------------------------------------------------------------
 
     col_widths = [
@@ -1265,10 +1444,10 @@ def create_pdf(
                 "FONTNAME",
                 (0, 0),
                 (-1, -1),
-                FONT_NAME,
+                font_name,
             ),
 
-            # Заголовок всего отчёта.
+            # Общий заголовок.
             (
                 "SPAN",
                 (0, 0),
@@ -1296,7 +1475,7 @@ def create_pdf(
                 (0, 2),
             ),
 
-            # BNP.
+            # Нормальная работа.
             (
                 "SPAN",
                 (12, 1),
@@ -1305,12 +1484,6 @@ def create_pdf(
 
             # Итого.
             (
-                "SPAN",
-                (4, total_row_index),
-                (8, total_row_index),
-            ),
-
-            (
                 "LINEABOVE",
                 (0, total_row_index),
                 (-1, total_row_index),
@@ -1318,6 +1491,7 @@ def create_pdf(
                 colors.black,
             ),
 
+            # Среднее.
             (
                 "LINEABOVE",
                 (0, average_row_index),
@@ -1329,28 +1503,14 @@ def create_pdf(
             (
                 "TOPPADDING",
                 (0, 0),
-                (-1, 1),
+                (-1, 2),
                 4,
             ),
 
             (
                 "BOTTOMPADDING",
                 (0, 0),
-                (-1, 1),
-                4,
-            ),
-
-            (
-                "TOPPADDING",
-                (0, total_row_index),
-                (-1, average_row_index),
-                4,
-            ),
-
-            (
-                "BOTTOMPADDING",
-                (0, total_row_index),
-                (-1, average_row_index),
+                (-1, 2),
                 4,
             ),
         ])
@@ -1359,7 +1519,7 @@ def create_pdf(
     elements.append(table)
 
     # ------------------------------------------------------------------------
-    # СТРАНИЦА 2 — ХОЛОДНАЯ ВОДА
+    # Страница 2 — холодная вода
     # ------------------------------------------------------------------------
 
     elements.append(PageBreak())
@@ -1374,26 +1534,32 @@ def create_pdf(
     cold_table_data = [
         [
             paragraph("Дата", header_style),
-            paragraph("V3", header_style),
-            paragraph("BNP", header_style),
+            paragraph(
+                f"V3, {v_unit}",
+                header_style,
+            ),
+            paragraph(
+                f"BNP, {bnp_unit}",
+                header_style,
+            ),
         ]
     ]
 
     cold_rows = []
 
-    for d in all_dates:
-        row = rows_by_date[d]
+    for current_date in all_dates:
+        row = rows_by_date[current_date]
 
         v3 = value_from_record(
             row,
-            "TV2",
-            "V3",
+            REPORT_ELEMENTS["TV2"]["V3"],
+            active_elements,
         )
 
         bnp = value_from_record(
             row,
-            "TV2",
-            "BNP",
+            REPORT_ELEMENTS["TV2"]["BNP"],
+            active_elements,
         )
 
         cold_rows.append([
@@ -1403,15 +1569,23 @@ def create_pdf(
 
         cold_table_data.append([
             paragraph(
-                d.strftime("%d.%m.%Y"),
+                current_date.strftime("%d.%m.%Y"),
                 cell_style,
             ),
+
             paragraph(
-                format_number(v3),
+                format_number(
+                    v3,
+                    tv2_v1_dec,
+                ),
                 cell_style,
             ),
+
             paragraph(
-                format_number(bnp),
+                format_number(
+                    bnp,
+                    tv2_bnp_dec,
+                ),
                 cell_style,
             ),
         ])
@@ -1431,12 +1605,14 @@ def create_pdf(
             "<b>Итого</b>",
             total_style,
         ),
+
         paragraph(
-            f"<b>{format_number(cold_total_v3)}</b>",
+            f"<b>{format_number(cold_total_v3, tv2_v1_dec)}</b>",
             total_style,
         ),
+
         paragraph(
-            f"<b>{format_number(cold_total_bnp)}</b>",
+            f"<b>{format_number(cold_total_bnp, tv2_bnp_dec)}</b>",
             total_style,
         ),
     ]
@@ -1487,7 +1663,7 @@ def create_pdf(
                 "FONTNAME",
                 (0, 0),
                 (-1, -1),
-                FONT_NAME,
+                font_name,
             ),
             (
                 "LINEABOVE",
@@ -1526,7 +1702,7 @@ def create_pdf(
     elements.append(cold_table)
 
     # ------------------------------------------------------------------------
-    # Информация об устройстве — мелким текстом внизу.
+    # Информация об устройстве
     # ------------------------------------------------------------------------
 
     device_info = (
@@ -1534,13 +1710,13 @@ def create_pdf(
         f"адрес: {device.get('address', '')}; "
         f"device_id: {device.get('id', '')}; "
         f"период: {first_day.strftime('%d.%m.%Y')} — "
-        f"{(next_month.fromordinal(next_month.toordinal() - 1)).strftime('%d.%m.%Y')}"
+        f"{last_day.strftime('%d.%m.%Y')}"
     )
 
     info_style = ParagraphStyle(
         "VKTInfo",
         parent=styles["Normal"],
-        fontName=FONT_NAME,
+        fontName=font_name,
         fontSize=6,
         leading=7,
         alignment=TA_CENTER,
@@ -1564,17 +1740,9 @@ def create_pdf(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Экспорт суточного архива ВКТ-7 из PostgreSQL "
-            "и генерация PDF без промежуточного CSV."
+            "Генерация PDF-отчета ВКТ-7 "
+            "из суточного архива PostgreSQL."
         )
-    )
-
-    parser.add_argument(
-        "command",
-        choices=[
-            "pdf",
-            "csv",
-        ],
     )
 
     parser.add_argument(
@@ -1583,69 +1751,54 @@ def build_parser() -> argparse.ArgumentParser:
             "VKT7_DB_URL",
             "postgresql://vkt7:vkt7@127.0.0.1:5432/vkt7",
         ),
-        help="PostgreSQL connection URL.",
+        help=(
+            "URL подключения PostgreSQL. "
+            "По умолчанию используется VKT7_DB_URL."
+        ),
     )
 
     parser.add_argument(
         "--device-id",
         type=int,
-        default=None,
+        required=True,
         help="ID устройства из vkt7.devices.",
     )
 
     parser.add_argument(
-        "--month",
-        default=None,
-        help="Месяц YYYY-MM. По умолчанию последний полный месяц.",
+        "--from",
+        dest="first_day",
+        type=lambda value: parse_date(
+            value,
+            "--from",
+        ),
+        required=True,
+        help="Дата начала периода: YYYY-MM-DD.",
+    )
+
+    parser.add_argument(
+        "--to",
+        dest="last_day",
+        type=lambda value: parse_date(
+            value,
+            "--to",
+        ),
+        required=True,
+        help="Дата окончания периода: YYYY-MM-DD. Включительно.",
     )
 
     parser.add_argument(
         "--output",
-        default=None,
-        help="PDF output file.",
-    )
-
-    parser.add_argument(
-        "--output-dir",
-        default="export",
-        help="Каталог для CSV.",
+        required=True,
+        help="Путь к итоговому PDF.",
     )
 
     parser.add_argument(
         "--verbose",
         action="store_true",
+        help="Включить подробный лог.",
     )
 
     return parser
-
-
-def resolve_device_id(
-    conn,
-    requested: Optional[int],
-) -> int:
-
-    if requested is not None:
-        # Проверяем наличие.
-        get_device(conn, requested)
-        return requested
-
-    sql = """
-        SELECT id
-        FROM vkt7.devices
-        ORDER BY id
-        LIMIT 1
-    """
-
-    with conn.cursor() as cur:
-        cur.execute(sql)
-        row = cur.fetchone()
-
-    if not row:
-        raise RuntimeError(
-            "В vkt7.devices нет устройств."
-        )
-
-    return int(row[0])
 
 
 def main() -> int:
@@ -1653,33 +1806,42 @@ def main() -> int:
     args = parser.parse_args()
 
     logging.basicConfig(
-        level=logging.DEBUG if args.verbose else logging.INFO,
-        format="%(asctime)s %(levelname)s %(message)s",
+        level=(
+            logging.DEBUG
+            if args.verbose
+            else logging.INFO
+        ),
+        format=(
+            "%(asctime)s "
+            "%(levelname)s "
+            "%(message)s"
+        ),
     )
 
-    first_day, next_month = parse_month(
-        args.month
-    )
+    try:
+        validate_period(
+            args.first_day,
+            args.last_day,
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
 
-    LOG.info(
-        "Период: %s — %s",
-        first_day,
-        next_month,
-    )
+    output = Path(args.output)
 
     conn = None
 
     try:
-        conn = connect_db(args.db_url)
-
-        device_id = resolve_device_id(
-            conn,
-            args.device_id,
+        LOG.info(
+            "Период отчета: %s — %s",
+            args.first_day,
+            args.last_day,
         )
+
+        conn = connect_db(args.db_url)
 
         device = get_device(
             conn,
-            device_id,
+            args.device_id,
         )
 
         LOG.info(
@@ -1689,11 +1851,31 @@ def main() -> int:
             device["address"],
         )
 
+        active_elements = get_active_elements(
+            conn,
+            args.device_id,
+        )
+
+        LOG.info(
+            "Активных элементов: %d",
+            len(active_elements),
+        )
+
+        properties = get_properties(
+            conn,
+            args.device_id,
+        )
+
+        LOG.info(
+            "Свойств: %d",
+            len(properties),
+        )
+
         rows = get_daily_rows(
             conn,
-            device_id,
-            first_day,
-            next_month,
+            args.device_id,
+            args.first_day,
+            args.last_day,
         )
 
         LOG.info(
@@ -1701,76 +1883,41 @@ def main() -> int:
             len(rows),
         )
 
-        if args.command == "csv":
-            output_dir = Path(args.output_dir)
-
-            tv1, tv2 = build_records(rows)
-
-            output_dir.mkdir(
-                parents=True,
-                exist_ok=True,
+        if not rows:
+            LOG.warning(
+                "За указанный период суточных записей нет."
             )
 
-            write_csv(
-                tv1,
-                output_dir / "tv1.csv",
-            )
+        output.parent.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
 
-            write_csv(
-                tv2,
-                output_dir / "tv2.csv",
-            )
+        create_pdf(
+            rows=rows,
+            device=device,
+            active_elements=active_elements,
+            properties=properties,
+            first_day=args.first_day,
+            last_day=args.last_day,
+            output=output,
+        )
 
-            print(
-                f"TV1: {output_dir / 'tv1.csv'}"
-            )
+        print(f"PDF: {output}")
 
-            print(
-                f"TV2: {output_dir / 'tv2.csv'}"
-            )
-
-        elif args.command == "pdf":
-            if args.output:
-                output = Path(args.output)
-            else:
-                output = Path(
-                    f"vkt7_{device['name']}_"
-                    f"{first_day.strftime('%Y-%m')}.pdf"
-                )
-
-            output.parent.mkdir(
-                parents=True,
-                exist_ok=True,
-            )
-
-            create_pdf(
-                rows,
-                device,
-                first_day,
-                next_month,
-                output,
-            )
-
-            print(
-                f"PDF: {output}"
-            )
-
-        conn.commit()
         return 0
 
     except KeyboardInterrupt:
-        LOG.warning("Остановлено пользователем.")
+        LOG.warning(
+            "Остановлено пользователем."
+        )
         return 130
 
     except Exception as exc:
-        if conn is not None:
-            conn.rollback()
-
         LOG.exception(
             "Ошибка: %s",
             exc,
         )
-
         return 1
 
     finally:
