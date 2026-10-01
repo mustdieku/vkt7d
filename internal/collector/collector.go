@@ -62,12 +62,16 @@ func (x *Collector) once(ctx context.Context) {
 		return
 	}
 	reportDay := 0
+	var archiveMeta model.Record
 	if raw, e := c.ReadService(); e != nil {
 		x.Log.Warn("service information", "error", e)
 	} else if svc, e := protocol.ParseService(raw); e != nil {
 		x.Log.Warn("service information", "error", e)
 	} else {
 		reportDay = svc.ReportDay
+		schemeTV1, schemeTV2 := svc.SchemeTV1, svc.SchemeTV2
+		archiveMeta.SchemeTV1 = &schemeTV1
+		archiveMeta.SchemeTV2 = &schemeTV2
 	}
 	// Properties are refreshed every session, then active list is obtained.
 	if e := x.collectProperties(ctx, c, id); e != nil {
@@ -100,6 +104,18 @@ func (x *Collector) once(ctx context.Context) {
 	if e = x.Store.UpsertActive(ctx, id, es); e != nil {
 		x.Log.Error("save active elements", "error", e)
 	}
+	// ReadActiveDB is valid for a normal data type. The service record already
+	// supplied the TV1/TV2 scheme numbers, so this extra read is only needed for
+	// the active database field. The archive collector restores its own type
+	// before reading archive data.
+	if e := c.SetType(protocol.Current); e != nil {
+		x.Log.Warn("select current type for archive metadata", "error", e)
+	} else if db, _, _, e := c.ReadActiveDB(); e != nil {
+		x.Log.Warn("active database", "error", e)
+	} else {
+		activeDB := int(db)
+		archiveMeta.ActiveDB = &activeDB
+	}
 	// Use a compact list; only elements meaningful for the selected type are sent.
 	for _, job := range []struct {
 		typ   int
@@ -107,7 +123,7 @@ func (x *Collector) once(ctx context.Context) {
 		step  time.Duration
 		batch int
 	}{{0, "hourly_archive", time.Hour, x.Cfg.BatchHourly}, {1, "daily_archive", 24 * time.Hour, x.Cfg.BatchDaily}, {2, "monthly_archive", 0, x.Cfg.BatchMonthly}, {3, "total_archive", 0, x.Cfg.BatchTotal}} {
-		x.collectArchive(ctx, c, id, es, job.typ, job.table, job.step, job.batch, reportDay)
+		x.collectArchive(ctx, c, id, es, job.typ, job.table, job.step, job.batch, reportDay, &archiveMeta)
 	}
 	if v, e := c.ReadCurrent(protocol.Current, filter(es, protocol.Current)); e == nil {
 		_ = x.Store.SaveCurrent(ctx, "current_values", id, v)
@@ -143,7 +159,7 @@ func meaningful(a, typ int) bool {
 	return false
 }
 
-func (x *Collector) collectArchive(ctx context.Context, c *protocol.Client, id int64, active []model.Element, typ int, table string, step time.Duration, batch int, reportDay int) {
+func (x *Collector) collectArchive(ctx context.Context, c *protocol.Client, id int64, active []model.Element, typ int, table string, step time.Duration, batch int, reportDay int, meta *model.Record) {
 	x.Log.Info("archive start", "table", table, "type", typ)
 
 	// VKT-7 protocol section 5.4 requires this order for every archive type:
@@ -211,7 +227,7 @@ func (x *Collector) collectArchive(ctx context.Context, c *protocol.Client, id i
 		if !due(start, typ, time.Now()) {
 			break
 		}
-		v, fresh, e := x.readArchiveRecord(c, typ, start, es, active)
+		v, fresh, freshMeta, e := x.readArchiveRecord(c, typ, start, es, active, meta)
 		if e != nil {
 			if protocol.IsExceptionCode(e, 3) {
 				// Exception 3 means that there is no record for the
@@ -239,7 +255,10 @@ func (x *Collector) collectArchive(ctx context.Context, c *protocol.Client, id i
 			active = fresh
 			es = filter(active, typ)
 		}
-		if e = x.Store.SaveArchive(ctx, table, id, start, v); e != nil {
+		if freshMeta != nil {
+			*meta = *freshMeta
+		}
+		if e = x.Store.SaveArchive(ctx, table, id, start, v, meta); e != nil {
 			x.Log.Error("save archive", "table", table, "error", e)
 			return
 		}
@@ -304,7 +323,7 @@ func splitArchiveReadList(es []model.Element) [][]model.Element {
 	return chunks
 }
 
-func (x *Collector) readArchiveRecord(c *protocol.Client, typ int, when time.Time, es []model.Element, active []model.Element) (map[string]model.Value, []model.Element, error) {
+func (x *Collector) readArchiveRecord(c *protocol.Client, typ int, when time.Time, es []model.Element, active []model.Element, meta *model.Record) (map[string]model.Value, []model.Element, *model.Record, error) {
 	// A VKT-7 archive response is a variable-length sequence. Do not assume
 	// that one large read list is safe for every firmware revision.
 	//
@@ -313,7 +332,7 @@ func (x *Collector) readArchiveRecord(c *protocol.Client, typ int, when time.Tim
 	for attempt := 0; attempt < 2; attempt++ {
 		chunks := splitArchiveReadList(es)
 		if len(chunks) == 0 {
-			return nil, active, fmt.Errorf(
+			return nil, active, nil, fmt.Errorf(
 				"empty archive read list for type %d", typ,
 			)
 		}
@@ -327,7 +346,7 @@ func (x *Collector) readArchiveRecord(c *protocol.Client, typ int, when time.Tim
 					schemeChanged = true
 					break
 				}
-				return nil, active, fmt.Errorf(
+				return nil, active, nil, fmt.Errorf(
 					"set archive read list chunk %d/%d: %w",
 					chunkNo+1, len(chunks), err,
 				)
@@ -349,7 +368,7 @@ func (x *Collector) readArchiveRecord(c *protocol.Client, typ int, when time.Tim
 					schemeChanged = true
 					break
 				}
-				return nil, active, fmt.Errorf(
+				return nil, active, nil, fmt.Errorf(
 					"set archive date %s chunk %d/%d: %w",
 					when.Format(time.RFC3339),
 					chunkNo+1,
@@ -367,7 +386,7 @@ func (x *Collector) readArchiveRecord(c *protocol.Client, typ int, when time.Tim
 					schemeChanged = true
 					break
 				}
-				return nil, active, fmt.Errorf(
+				return nil, active, nil, fmt.Errorf(
 					"read archive %s chunk %d/%d: %w",
 					when.Format(time.RFC3339),
 					chunkNo+1,
@@ -381,7 +400,7 @@ func (x *Collector) readArchiveRecord(c *protocol.Client, typ int, when time.Tim
 			// instead of silently writing corrupted records.
 			values, err := protocol.ParseElements(chunk, data, typ)
 			if err != nil {
-				return nil, active, fmt.Errorf(
+				return nil, active, nil, fmt.Errorf(
 					"parse archive %s chunk %d/%d: %w; elements=%d data_len=%d",
 					when.Format(time.RFC3339),
 					chunkNo+1,
@@ -398,7 +417,7 @@ func (x *Collector) readArchiveRecord(c *protocol.Client, typ int, when time.Tim
 		}
 
 		if !schemeChanged {
-			return result, active, nil
+			return result, active, meta, nil
 		}
 
 		// The record belongs to another measurement scheme. The VKT-7
@@ -406,21 +425,47 @@ func (x *Collector) readArchiveRecord(c *protocol.Client, typ int, when time.Tim
 		// the read list before retrying the same timestamp.
 		fresh, err := c.ActiveElements()
 		if err != nil {
-			return nil, active, err
+			return nil, active, nil, err
 		}
 
 		es = filter(fresh, typ)
 		if len(es) == 0 {
-			return nil, active, fmt.Errorf(
+			return nil, active, nil, fmt.Errorf(
 				"no active elements for archive type %d after scheme change",
 				typ,
 			)
 		}
 
 		active = fresh
+		// A scheme change invalidates the scheme metadata captured at session
+		// start. ReadScheme is a >=1.9 diagnostic operation, so it is used only
+		// when the device explicitly reports the scheme-change condition.
+		if err := c.SetType(protocol.Current); err != nil {
+			return nil, active, nil, fmt.Errorf("select current type after scheme change: %w", err)
+		}
+		s1, _, _, err := c.ReadScheme(1)
+		if err != nil {
+			return nil, active, nil, fmt.Errorf("refresh TV1 scheme after scheme change: %w", err)
+		}
+		s2, _, _, err := c.ReadScheme(2)
+		if err != nil {
+			return nil, active, nil, fmt.Errorf("refresh TV2 scheme after scheme change: %w", err)
+		}
+		db, _, _, err := c.ReadActiveDB()
+		if err != nil {
+			return nil, active, nil, fmt.Errorf("refresh active DB after scheme change: %w", err)
+		}
+		i1, i2, idb := int(s1), int(s2), int(db)
+		meta = &model.Record{SchemeTV1: &i1, SchemeTV2: &i2, ActiveDB: &idb}
+		if err := c.SetType(byte(typ)); err != nil {
+			return nil, active, nil, fmt.Errorf("restore archive type %d after scheme change: %w", typ, err)
+		}
+		if err := c.SetReadList(es); err != nil {
+			return nil, active, nil, fmt.Errorf("restore archive read list after scheme change: %w", err)
+		}
 	}
 
-	return nil, active, &protocol.ExceptionError{
+	return nil, active, nil, &protocol.ExceptionError{
 		Code:     5,
 		Function: 0x03,
 	}

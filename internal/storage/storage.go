@@ -96,16 +96,28 @@ func encode(v map[string]model.Value) (vals, q, ns, raw []byte) {
 	raw, _ = json.Marshal(d)
 	return
 }
-func (s *Store) SaveArchive(ctx context.Context, table string, id int64, t time.Time, v map[string]model.Value) error {
+func (s *Store) SaveArchive(ctx context.Context, table string, id int64, t time.Time, v map[string]model.Value, meta *model.Record) error {
 	vals, q, ns, raw := encode(v)
+	var schemeTV1, schemeTV2, activeDB any
+	if meta != nil {
+		if meta.SchemeTV1 != nil {
+			schemeTV1 = *meta.SchemeTV1
+		}
+		if meta.SchemeTV2 != nil {
+			schemeTV2 = *meta.SchemeTV2
+		}
+		if meta.ActiveDB != nil {
+			activeDB = *meta.ActiveDB
+		}
+	}
 	var sql string
 	var archiveKey any
 	switch table {
 	case "hourly_archive":
-		sql = `INSERT INTO vkt7.hourly_archive(device_id,archive_time,"values",quality,ns,raw) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(device_id,archive_time) DO UPDATE SET "values"=excluded."values",quality=excluded.quality,ns=excluded.ns,raw=excluded.raw,collected_at=now()`
+		sql = `INSERT INTO vkt7.hourly_archive(device_id,archive_time,scheme_tv1,scheme_tv2,active_db,"values",quality,ns,raw) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(device_id,archive_time) DO UPDATE SET scheme_tv1=excluded.scheme_tv1,scheme_tv2=excluded.scheme_tv2,active_db=excluded.active_db,"values"=excluded."values",quality=excluded.quality,ns=excluded.ns,raw=excluded.raw,collected_at=now()`
 		archiveKey = t
 	case "daily_archive", "monthly_archive", "total_archive":
-		sql = fmt.Sprintf(`INSERT INTO vkt7.%s(device_id,archive_date,"values",quality,ns,raw) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(device_id,archive_date) DO UPDATE SET "values"=excluded."values",quality=excluded.quality,ns=excluded.ns,raw=excluded.raw,collected_at=now()`, table)
+		sql = `INSERT INTO vkt7.hourly_archive(device_id,archive_time,scheme_tv1,scheme_tv2,active_db,"values",quality,ns,raw) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(device_id,archive_time) DO UPDATE SET scheme_tv1=excluded.scheme_tv1,scheme_tv2=excluded.scheme_tv2,active_db=excluded.active_db,"values"=excluded."values",quality=excluded.quality,ns=excluded.ns,raw=excluded.raw,collected_at=now()`
 		archiveKey = time.Date(
 			t.Year(),
 			t.Month(),
@@ -116,7 +128,7 @@ func (s *Store) SaveArchive(ctx context.Context, table string, id int64, t time.
 	default:
 		return fmt.Errorf("bad archive table %q", table)
 	}
-	_, e := s.Pool.Exec(ctx, sql, id, archiveKey, vals, q, ns, raw)
+	_, e := s.Pool.Exec(ctx, sql, id, archiveKey, schemeTV1, schemeTV2, activeDB, vals, q, ns, raw)
 	return e
 }
 func (s *Store) SaveProperties(ctx context.Context, id int64, v map[string]model.Value) error {
