@@ -59,7 +59,7 @@ func (s *Store) ReportDay(ctx context.Context, id int64) (int, error) {
 	return day, nil
 }
 
-func (s *Store) Touch(ctx context.Context, id int64, fw, sv, sc1, sc2, sub, report, modelNo, db int) error {
+func (s *Store) Touch(ctx context.Context, id int64, fw, sv, sc1, sc2 int, sub string, report, modelNo, db int) error {
 	_, e := s.Pool.Exec(ctx, `UPDATE vkt7.devices SET firmware_version=$2,server_version=$3,scheme_tv1=$4,scheme_tv2=$5,subscriber_id=$6,report_day=$7,model=$8,active_db=$9,last_seen_at=now(),updated_at=now() WHERE id=$1`, id, fw, sv, sc1, sc2, sub, report, modelNo, db)
 	return e
 }
@@ -221,6 +221,12 @@ func (s *Store) Last(ctx context.Context, table string, id int64) (*time.Time, e
 
 	if err != nil {
 		return nil, err
+	}
+	// hourly_archive.archive_time is TIMESTAMP WITHOUT TIME ZONE. It stores
+	// VKT-7 local wall-clock time, not an instant. pgx scans it as a UTC
+	// time.Time, so restore the local location before cursor arithmetic.
+	if table == "hourly_archive" {
+		t = time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), t.Minute(), t.Second(), t.Nanosecond(), time.Local)
 	}
 	// Return a copy owned by the caller. pgx returns a value in the database
 	// connection's location; archive cursor arithmetic is performed in the

@@ -53,23 +53,39 @@ func (x *Collector) once(ctx context.Context) {
 		x.Store.Log(ctx, id, "protocol_error", e)
 		return
 	}
+	serverVersion := 0
 	// VKT-7 protocol 5.1:
 	// after BeginSession the first ReadData must be performed so that the
 	// server-version field is consumed before properties/archive operations.
-	if _, e = c.ReadData(); e != nil {
+	initialData, e := c.ReadData()
+	if e != nil {
 		x.Log.Error("initial read-data", "error", e)
 		x.Store.Log(ctx, id, "protocol_error", e)
 		return
 	}
+	if len(initialData) > 0 {
+		serverVersion = int(initialData[0])
+	}
 	reportDay := 0
 	var archiveMeta model.Record
+	firmware := 0
+	schemeTV1 := 0
+	schemeTV2 := 0
+	subscriberID := ""
+	modelNo := 0
+	serviceOK := false
 	if raw, e := c.ReadService(); e != nil {
 		x.Log.Warn("service information", "error", e)
 	} else if svc, e := protocol.ParseService(raw); e != nil {
 		x.Log.Warn("service information", "error", e)
 	} else {
+		serviceOK = true
+		firmware = svc.Firmware
+		schemeTV1 = svc.SchemeTV1
+		schemeTV2 = svc.SchemeTV2
+		subscriberID = svc.Subscriber
 		reportDay = svc.ReportDay
-		schemeTV1, schemeTV2 := svc.SchemeTV1, svc.SchemeTV2
+		modelNo = svc.Model
 		archiveMeta.SchemeTV1 = &schemeTV1
 		archiveMeta.SchemeTV2 = &schemeTV2
 	}
@@ -115,6 +131,11 @@ func (x *Collector) once(ctx context.Context) {
 	} else {
 		activeDB := int(db)
 		archiveMeta.ActiveDB = &activeDB
+	}
+	if serviceOK && archiveMeta.ActiveDB != nil {
+		if e := x.Store.Touch(ctx, id, firmware, serverVersion, schemeTV1, schemeTV2, subscriberID, reportDay, modelNo, *archiveMeta.ActiveDB); e != nil {
+			x.Log.Warn("device metadata", "error", e)
+		}
 	}
 	// Use a compact list; only elements meaningful for the selected type are sent.
 	for _, job := range []struct {
