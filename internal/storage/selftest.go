@@ -49,7 +49,7 @@ func (s *Store) SelfTest(ctx context.Context, write bool, deviceName string, add
 		"V1_1": {Value: 123.5, Quality: 0xC0, NS: 0, Raw: []byte{0x00, 0x00, 0xF7, 0x42}},
 	}
 	ts := time.Now().Truncate(time.Hour).Add(-time.Hour)
-	if err := s.SaveArchive(ctx, "hourly_archive", id, ts, vals); err != nil {
+	if err := s.SaveArchive(ctx, "hourly_archive", id, ts, vals, nil); err != nil {
 		return fmt.Errorf("SaveArchive(): %w", err)
 	}
 	last, err := s.Last(ctx, "hourly_archive", id)
