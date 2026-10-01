@@ -181,8 +181,7 @@ def format_number(value: Any, decimals: int = 3) -> str:
     number = to_number(value)
     if number is None:
         return ""
-    if abs(number) < 0.5 * 10 ** (-decimals):
-        number = 0.0
+    number /= 10 ** decimals
     return f"{number:.{decimals}f}"
 
 
