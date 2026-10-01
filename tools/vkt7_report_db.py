@@ -524,12 +524,12 @@ def create_pdf(
     tv1_dt_dec = decimals_for_element(properties, REPORT_ELEMENTS["TV1"]["dt"], tv1_t1_dec)
     tv1_p1_dec = decimals_for_element(properties, REPORT_ELEMENTS["TV1"]["P1"], 2)
     tv1_p2_dec = decimals_for_element(properties, REPORT_ELEMENTS["TV1"]["P2"], 2)
-    tv1_bnp_dec = decimals_for_element(properties, REPORT_ELEMENTS["TV1"]["BNP"], 2)
+    tv1_bnp_dec = decimals_for_element(properties, REPORT_ELEMENTS["TV1"]["BNP"], 0)
 
     tv2_qo_dec = decimals_for_element(properties, REPORT_ELEMENTS["TV2"]["Qo"], 3)
     tv2_v1_dec = decimals_for_element(properties, REPORT_ELEMENTS["TV2"]["V1"], 2)
     tv2_t1_dec = decimals_for_element(properties, REPORT_ELEMENTS["TV2"]["t1"], 2)
-    tv2_bnp_dec = decimals_for_element(properties, REPORT_ELEMENTS["TV2"]["BNP"], 2)
+    tv2_bnp_dec = decimals_for_element(properties, REPORT_ELEMENTS["TV2"]["BNP"], 0)
     tv2_v3_dec = decimals_for_element(properties, REPORT_ELEMENTS["TV2"]["V3"], 2)
 
     t_unit = unit_for(properties, "t", "°C")
