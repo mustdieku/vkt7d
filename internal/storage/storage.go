@@ -117,7 +117,7 @@ func (s *Store) SaveArchive(ctx context.Context, table string, id int64, t time.
 		sql = `INSERT INTO vkt7.hourly_archive(device_id,archive_time,scheme_tv1,scheme_tv2,active_db,"values",quality,ns,raw) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(device_id,archive_time) DO UPDATE SET scheme_tv1=excluded.scheme_tv1,scheme_tv2=excluded.scheme_tv2,active_db=excluded.active_db,"values"=excluded."values",quality=excluded.quality,ns=excluded.ns,raw=excluded.raw,collected_at=now()`
 		archiveKey = t
 	case "daily_archive", "monthly_archive", "total_archive":
-		sql = `INSERT INTO vkt7.hourly_archive(device_id,archive_time,scheme_tv1,scheme_tv2,active_db,"values",quality,ns,raw) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(device_id,archive_time) DO UPDATE SET scheme_tv1=excluded.scheme_tv1,scheme_tv2=excluded.scheme_tv2,active_db=excluded.active_db,"values"=excluded."values",quality=excluded.quality,ns=excluded.ns,raw=excluded.raw,collected_at=now()`
+		sql = fmt.Sprintf(`INSERT INTO vkt7.%s(device_id,archive_date,scheme_tv1,scheme_tv2,active_db,"values",quality,ns,raw) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(device_id,archive_date) DO UPDATE SET scheme_tv1=excluded.scheme_tv1,scheme_tv2=excluded.scheme_tv2,active_db=excluded.active_db,"values"=excluded."values",quality=excluded.quality,ns=excluded.ns,raw=excluded.raw,collected_at=now()`, table)
 		archiveKey = time.Date(
 			t.Year(),
 			t.Month(),
