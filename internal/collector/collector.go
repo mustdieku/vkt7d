@@ -362,7 +362,7 @@ func (x *Collector) readArchiveRecord(c *protocol.Client, typ int, when time.Tim
 					typ == protocol.Total,
 			); err != nil {
 				if protocol.IsExceptionCode(err, 3) {
-					return nil, active, err
+					return nil, active, nil, err
 				}
 				if protocol.IsExceptionCode(err, 5) {
 					schemeChanged = true
@@ -380,7 +380,7 @@ func (x *Collector) readArchiveRecord(c *protocol.Client, typ int, when time.Tim
 			data, err := c.ReadData()
 			if err != nil {
 				if protocol.IsExceptionCode(err, 3) {
-					return nil, active, err
+					return nil, active, nil, err
 				}
 				if protocol.IsExceptionCode(err, 5) {
 					schemeChanged = true
