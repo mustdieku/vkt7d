@@ -18,6 +18,7 @@ import (
 	"golang.org/x/text/encoding/charmap"
 
 	"vkt7d/internal/model"
+	"vkt7d/internal/rfc2217"
 )
 
 const (
@@ -630,6 +631,9 @@ func decodeInt(b []byte) int64 {
 }
 
 func Open(port string, baud int) (serial.Port, error) {
+	if strings.HasPrefix(strings.ToLower(port), "rfc2217://") {
+		return rfc2217.Open(port, baud)
+	}
 	m := &serial.Mode{
 		BaudRate: baud,
 		DataBits: 8,
