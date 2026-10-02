@@ -105,8 +105,8 @@ ARCHIVE_NAMES: Dict[int, str] = {
 REPORT_ELEMENTS = {
     "TV1": {
         "Qo": 12,
-        "M1": 6,
-        "M2": 7,
+        "V1": 3,
+        "V2": 4,
         "t1": 0,
         "t2": 1,
         "dt": 14,
@@ -517,8 +517,8 @@ def create_pdf(
     # The property name is derived from the actual archive key, so V1_2
     # uses V1_dec (not V2_dec), Qo_2 uses Qo2_dec, etc.
     tv1_qo_dec = decimals_for_element(properties, REPORT_ELEMENTS["TV1"]["Qo"], 3)
-    tv1_m1_dec = decimals_for_element(properties, REPORT_ELEMENTS["TV1"]["M1"], 2)
-    tv1_m2_dec = decimals_for_element(properties, REPORT_ELEMENTS["TV1"]["M2"], 2)
+    tv1_v1_dec = decimals_for_element(properties, REPORT_ELEMENTS["TV1"]["V1"], 2)
+    tv1_v2_dec = decimals_for_element(properties, REPORT_ELEMENTS["TV1"]["V2"], 2)
     tv1_t1_dec = decimals_for_element(properties, REPORT_ELEMENTS["TV1"]["t1"], 2)
     tv1_t2_dec = decimals_for_element(properties, REPORT_ELEMENTS["TV1"]["t2"], 2)
     tv1_dt_dec = decimals_for_element(properties, REPORT_ELEMENTS["TV1"]["dt"], tv1_t1_dec)
@@ -575,8 +575,8 @@ def create_pdf(
         [
             "",
             paragraph(f"Qотопления, {qo_unit}", header_style),
-            paragraph(f"Mпод, {m_unit}", header_style),
-            paragraph(f"Mобр, {m_unit}", header_style),
+            paragraph(f"Vпод, {v_unit}", header_style),
+            paragraph(f"Vобр, {v_unit}", header_style),
             paragraph(f"Tпод, {t_unit}", header_style),
             paragraph(f"Tобр, {t_unit}", header_style),
             paragraph(f"ΔT, {t_unit}", header_style),
@@ -594,8 +594,8 @@ def create_pdf(
         row = rows_by_date[current_date]
         tv1 = [
             value_from_record(row, REPORT_ELEMENTS["TV1"]["Qo"], active_elements),
-            value_from_record(row, REPORT_ELEMENTS["TV1"]["M1"], active_elements),
-            value_from_record(row, REPORT_ELEMENTS["TV1"]["M2"], active_elements),
+            value_from_record(row, REPORT_ELEMENTS["TV1"]["V1"], active_elements),
+            value_from_record(row, REPORT_ELEMENTS["TV1"]["V2"], active_elements),
             value_from_record(row, REPORT_ELEMENTS["TV1"]["t1"], active_elements),
             value_from_record(row, REPORT_ELEMENTS["TV1"]["t2"], active_elements),
             value_from_record(row, REPORT_ELEMENTS["TV1"]["dt"], active_elements),
@@ -612,7 +612,7 @@ def create_pdf(
         daily_rows.append(values)
 
         decimals = [
-            tv1_qo_dec, tv1_m1_dec, tv1_m2_dec, tv1_t1_dec, tv1_t2_dec,
+            tv1_qo_dec, tv1_v1_dec, tv1_v2_dec, tv1_t1_dec, tv1_t2_dec,
             tv1_dt_dec, tv1_p1_dec, tv1_p2_dec, tv2_qo_dec, tv2_v1_dec,
             tv2_t1_dec, tv2_bnp_dec,
         ]
@@ -625,8 +625,8 @@ def create_pdf(
     total_row = [paragraph("<b>Итого</b>", total_style)]
     total_row += [
         paragraph(f"<b>{format_number(sum_values(r[0] for r in daily_rows), tv1_qo_dec)}</b>", total_style),
-        paragraph(f"<b>{format_number(sum_values(r[1] for r in daily_rows), tv1_m1_dec)}</b>", total_style),
-        paragraph(f"<b>{format_number(sum_values(r[2] for r in daily_rows), tv1_m2_dec)}</b>", total_style),
+        paragraph(f"<b>{format_number(sum_values(r[1] for r in daily_rows), tv1_v1_dec)}</b>", total_style),
+        paragraph(f"<b>{format_number(sum_values(r[2] for r in daily_rows), tv1_v2_dec)}</b>", total_style),
         "", "", "", "", "",
         paragraph(f"<b>{format_number(sum_values(r[8] for r in daily_rows), tv2_qo_dec)}</b>", total_style),
         paragraph(f"<b>{format_number(sum_values(r[9] for r in daily_rows), tv2_v1_dec)}</b>", total_style),
@@ -675,7 +675,7 @@ def create_pdf(
 
     # ------------------------------------------------------------------ page 2
     elements.append(PageBreak())
-    elements.append(Paragraph("Архив ВКТ-7 — холодная вода", title_style))
+    elements.append(Paragraph("Название организации и номер договора", title_style))
 
     cold_table_data = [
         [paragraph(f"<b>Отчет о суточных параметрах потребления воды за период: {first_day.strftime('%d.%m.%Y')} — {last_day.strftime('%d.%m.%Y')}</b>", header_style)] + [""] * 2,
