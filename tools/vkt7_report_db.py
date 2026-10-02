@@ -565,7 +565,7 @@ def create_pdf(
 
     # ------------------------------------------------------------------ page 1
     table_data = [
-        [paragraph("<b>Отчет о суточных параметрах теплопотребления за период</b>", header_style)] + [""] * 12,
+        [paragraph(f"<b>Отчет о суточных параметрах теплопотребления за период: {first_day.strftime('%d.%m.%Y')} — {last_day.strftime('%d.%m.%Y')}</b>", header_style)] + [""] * 12,
         [
             paragraph("Дата", header_style),
             paragraph("Отопление", header_style), "", "", "", "", "", "", "",
@@ -619,13 +619,6 @@ def create_pdf(
         table_data.append(
             [paragraph(current_date.strftime("%d.%m.%Y"), cell_style)]
             + [paragraph(format_number(v, d), cell_style) for v, d in zip(values, decimals)]
-            + [paragraph(
-                format_number(
-                    value_from_record(row, REPORT_ELEMENTS["TV1"]["BNP"], active_elements),
-                    tv1_bnp_dec,
-                ),
-                cell_style,
-            )]
         )
 
     # Totals.
@@ -638,7 +631,7 @@ def create_pdf(
         paragraph(f"<b>{format_number(sum_values(r[8] for r in daily_rows), tv2_qo_dec)}</b>", total_style),
         paragraph(f"<b>{format_number(sum_values(r[9] for r in daily_rows), tv2_v1_dec)}</b>", total_style),
         "",
-        paragraph(f"<b>{format_number(sum_values(r[11] for r in daily_rows), tv2_bnp_dec)}</b>", total_style),
+        paragraph(f"<b>{format_number(sum_values(r[11] for r in daily_rows), tv1_bnp_dec)}</b>", total_style),
     ]
     table_data.append(total_row)
     total_row_index = len(table_data) - 1
@@ -652,9 +645,9 @@ def create_pdf(
         paragraph(f"<b>{format_number(average_values(r[5] for r in daily_rows), tv1_dt_dec)}</b>", total_style),
         paragraph(f"<b>{format_number(average_values(r[6] for r in daily_rows), tv1_p1_dec)}</b>", total_style),
         paragraph(f"<b>{format_number(average_values(r[7] for r in daily_rows), tv1_p2_dec)}</b>", total_style),
-        "",
+        "","",
         paragraph(f"<b>{format_number(average_values(r[10] for r in daily_rows), tv2_t1_dec)}</b>", total_style),
-        "", "",
+        "",
     ]
     table_data.append(average_row)
     average_row_index = len(table_data) - 1
@@ -684,11 +677,14 @@ def create_pdf(
     elements.append(PageBreak())
     elements.append(Paragraph("Архив ВКТ-7 — холодная вода", title_style))
 
-    cold_table_data = [[
-        paragraph("Дата", header_style),
-        paragraph(f"V3, {v_unit}", header_style),
-        paragraph(f"BNP, {bnp_unit}", header_style),
-    ]]
+    cold_table_data = [
+        [paragraph(f"<b>Отчет о суточных параметрах потребления воды за период: {first_day.strftime('%d.%m.%Y')} — {last_day.strftime('%d.%m.%Y')}</b>", header_style)] + [""] * 2,
+        [
+            paragraph("Дата", header_style),
+            paragraph(f"Vхвс, {v_unit}", header_style),
+            paragraph(f"Период нормальной работы, {bnp_unit}", header_style),
+        ]
+    ]
     cold_rows: List[List[Any]] = []
 
     for current_date in all_dates:
@@ -715,14 +711,15 @@ def create_pdf(
         ("GRID", (0, 0), (-1, -1), 0.5, colors.black),
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
         ("ALIGN", (0, 0), (-1, -1), "CENTER"),
-        ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
+        ("BACKGROUND", (0, 0), (-1, 1), colors.lightgrey),
         ("FONTNAME", (0, 0), (-1, -1), font_name),
+        ("SPAN", (0, 0), (2, 0)),
         ("LINEABOVE", (0, cold_total_row_index), (-1, cold_total_row_index), 1.0, colors.black),
         ("TOPPADDING", (0, 0), (-1, 0), 5),
         ("BOTTOMPADDING", (0, 0), (-1, 0), 5),
         ("TOPPADDING", (0, cold_total_row_index), (-1, cold_total_row_index), 5),
         ("BOTTOMPADDING", (0, cold_total_row_index), (-1, cold_total_row_index), 5),
-    ]))
+     ]))
     elements.append(cold_table)
 
     device_info = (
