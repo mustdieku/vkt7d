@@ -1,9 +1,11 @@
 package protocol
 
 import (
-	"errors"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
+	"math"
+	"reflect"
 	"testing"
 
 	"vkt7d/internal/model"
@@ -135,5 +137,189 @@ func TestParseActiveElementsUsesLogicalAddress(t *testing.T) {
 	}
 	if len(es) != 2 || es[0].Address != 44 || es[1].Address != 82 {
 		t.Fatalf("unexpected active elements: %+v", es)
+	}
+}
+
+func TestDecodeSignedInt(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  []byte
+		want int64
+	}{
+		{
+			name: "int8 positive",
+			raw:  []byte{0x58},
+			want: 88,
+		},
+		{
+			name: "int8 negative",
+			raw:  []byte{0xA8},
+			want: -88,
+		},
+		{
+			name: "int16 positive",
+			raw:  []byte{0x58, 0x00},
+			want: 88,
+		},
+		{
+			name: "int16 negative",
+			raw:  []byte{0xA8, 0xFF},
+			want: -88,
+		},
+		{
+			name: "int24 negative",
+			raw:  []byte{0xA8, 0xFF, 0xFF},
+			want: -88,
+		},
+		{
+			name: "int32 positive",
+			raw:  []byte{0x58, 0x00, 0x00, 0x00},
+			want: 88,
+		},
+		{
+			name: "int32 negative",
+			raw:  []byte{0xA8, 0xFF, 0xFF, 0xFF},
+			want: -88,
+		},
+		{
+			name: "int64 positive",
+			raw:  []byte{0x58, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
+			want: 88,
+		},
+		{
+			name: "int64 negative",
+			raw:  []byte{0xA8, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF},
+			want: -88,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := decodeSignedInt(tt.raw)
+			if err != nil {
+				t.Fatalf("decodeSignedInt(%X): %v", tt.raw, err)
+			}
+			if got != tt.want {
+				t.Fatalf("decodeSignedInt(%X) = %d, want %d", tt.raw, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestDecodeSignedIntRejectsInvalidSize(t *testing.T) {
+	if _, err := decodeSignedInt(nil); err == nil {
+		t.Fatal("expected error for empty integer")
+	}
+
+	if _, err := decodeSignedInt(make([]byte, 9)); err == nil {
+		t.Fatal("expected error for integer larger than 8 bytes")
+	}
+}
+
+func TestParseElementsSignedInt16(t *testing.T) {
+	// dt_1 (element 14), 2-byte signed integer:
+	//   A8 FF == 0xFFA8 == -88 as int16.
+	//
+	// Followed by quality and NS bytes.
+	es := []model.Element{
+		{
+			Address: 14,
+			Name:    "dt_1",
+			Size:    2,
+		},
+	}
+
+	d := []byte{
+		0xA8, 0xFF,
+		0xC0, // quality
+		0x00, // NS
+	}
+
+	got, err := ParseElements(es, d, Hourly)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	value, ok := got["dt_1"]
+	if !ok {
+		t.Fatal("dt_1 not found")
+	}
+
+	n, ok := value.Value.(int64)
+	if !ok {
+		t.Fatalf("dt_1 type = %T, want int64", value.Value)
+	}
+	if n != -88 {
+		t.Fatalf("dt_1 = %d, want -88", n)
+	}
+}
+
+func TestParseElementsFloat32(t *testing.T) {
+	es := []model.Element{
+		{
+			Address: 19,
+			Name:    "G1_1",
+			Size:    4,
+		},
+	}
+
+	d := make([]byte, 6)
+	binary.LittleEndian.PutUint32(d[0:4], math.Float32bits(12.5))
+	d[4] = 0xC0
+	d[5] = 0x00
+
+	got, err := ParseElements(es, d, Hourly)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	value, ok := got["G1_1"]
+	if !ok {
+		t.Fatal("G1_1 not found")
+	}
+
+	f, ok := value.Value.(float32)
+	if !ok {
+		t.Fatalf("G1_1 type = %T, want float32", value.Value)
+	}
+	if f != float32(12.5) {
+		t.Fatalf("G1_1 = %v, want 12.5", f)
+	}
+}
+
+func TestParseElementsQntNS(t *testing.T) {
+	es := []model.Element{
+		{
+			Address: 79,
+			Name:    "QntNS_1",
+			Size:    10,
+		},
+	}
+
+	d := make([]byte, 12)
+	for i := 0; i < 5; i++ {
+		binary.LittleEndian.PutUint16(d[i*2:i*2+2], uint16(i+1))
+	}
+	d[10] = 0xC0
+	d[11] = 0x00
+
+	got, err := ParseElements(es, d, Hourly)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	value, ok := got["QntNS_1"]
+	if !ok {
+		t.Fatal("QntNS_1 not found")
+	}
+
+	x, ok := value.Value.([]uint16)
+	if !ok {
+		t.Fatalf("QntNS_1 type = %T, want []uint16", value.Value)
+	}
+
+	want := []uint16{1, 2, 3, 4, 5}
+	if !reflect.DeepEqual(x, want) {
+		t.Fatalf("QntNS_1 = %v, want %v", x, want)
 	}
 }

@@ -593,24 +593,67 @@ func ParseElements(es []model.Element, d []byte, typ int) (map[string]model.Valu
 		q := d[off+e.Size]
 		ns := d[off+e.Size+1]
 		off += e.Size + 2
+
 		var v any
 		switch e.Address {
 		case 77, 78:
+			// NSPrintTypeM_1/2 are single printable characters.
 			v = string(raw)
+
 		case 79, 80:
-			if len(raw) == 10 {
-				x := make([]uint16, 5)
-				for i := range x {
-					x[i] = binary.LittleEndian.Uint16(raw[i*2:])
-				}
-				v = x
+			// QntNS_1/2 are five unsigned 16-bit counters.
+			if len(raw) != 10 {
+				return nil, fmt.Errorf(
+					"invalid element %d (%s) size: got %d, want 10",
+					e.Address, e.Name, len(raw),
+				)
 			}
+			x := make([]uint16, 5)
+			for i := range x {
+				x[i] = binary.LittleEndian.Uint16(raw[i*2 : i*2+2])
+			}
+			v = x
+
 		case 19, 20, 21, 41, 42, 43, 81:
-			if len(raw) >= 4 {
-				v = math.Float32frombits(binary.LittleEndian.Uint32(raw))
+			// G1/G2/G3 and DopInpImpP_Type are IEEE-754 float32.
+			if len(raw) != 4 {
+				return nil, fmt.Errorf(
+					"invalid float32 element %d (%s) size: got %d, want 4",
+					e.Address, e.Name, len(raw),
+				)
 			}
+			v = math.Float32frombits(binary.LittleEndian.Uint32(raw))
+
+		case 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56:
+			// Unit properties are handled by ParseProperties for the
+			// properties response. They must not be interpreted as integers
+			// in the ordinary element stream.
+			v = string(raw)
+
+		case 57, 58, 59, 60, 61, 62, 63, 64, 65, 66,
+			67, 68, 69, 70, 71, 72, 73, 74, 75, 76:
+			// Fraction-digit properties are unsigned 8-bit values.
+			if len(raw) != 1 {
+				return nil, fmt.Errorf(
+					"invalid uint8 property %d (%s) size: got %d, want 1",
+					e.Address, e.Name, len(raw),
+				)
+			}
+			v = uint8(raw[0])
+
 		default:
-			v = decodeInt(raw)
+			// All ordinary numeric VKT-7 elements use a signed integer
+			// representation. The actual width is supplied by the active
+			// element list (e.Size), so this must be sign-extended according
+			// to the element size instead of being decoded as uintN.
+			var err error
+			v, err = decodeSignedInt(raw)
+			if err != nil {
+				return nil, fmt.Errorf(
+					"decode element %d (%s): %w",
+					e.Address, e.Name, err,
+				)
+			}
 		}
 		out[e.Name] = model.Value{Value: v, Quality: q, NS: ns, Raw: raw}
 	}
@@ -618,16 +661,43 @@ func ParseElements(es []model.Element, d []byte, typ int) (map[string]model.Valu
 	}
 	return out, nil
 }
-func decodeInt(b []byte) int64 {
+
+// decodeSignedInt decodes an ordinary VKT-7 numeric element as a little-endian
+// signed integer and performs proper sign extension.
+//
+// The protocol does not use one fixed integer width for all ordinary
+// parameters: the size is supplied by the active-elements table. Therefore
+// this function accepts 1..8 bytes rather than assuming uint16/uint32.
+//
+// Examples:
+//
+//   A8       -> -88
+//   A8 FF    -> -88
+//   A8 FF FF -> -88
+//
+// The last byte contains the sign bit of the encoded integer.
+func decodeSignedInt(b []byte) (int64, error) {
+	if len(b) == 0 {
+		return 0, fmt.Errorf("empty signed integer")
+	}
+	if len(b) > 8 {
+		return 0, fmt.Errorf("signed integer size %d exceeds 8 bytes", len(b))
+	}
+
 	var x int64
-	n := len(b)
-	if n > 8 {
-		n = 8
+	for i, v := range b {
+		x |= int64(v) << (8 * i)
 	}
-	for i := 0; i < n; i++ {
-		x |= int64(b[i]) << (8 * i)
+
+	// Sign-extend the encoded integer to int64.
+	//
+	// For an 8-byte value there is nothing to extend because the sign bit
+	// is already int64's sign bit.
+	if len(b) < 8 && b[len(b)-1]&0x80 != 0 {
+		x |= ^int64(0) << (8 * len(b))
 	}
-	return x
+
+	return x, nil
 }
 
 func Open(port string, baud int) (serial.Port, error) {
