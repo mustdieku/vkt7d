@@ -614,6 +614,17 @@ func (p *Port) Close() error {
 		// the error is intentionally ignored because the TCP disconnect
 		// itself is the only remaining way to terminate the session.
 		_ = p.SetRTS(false)
+
+		// Clear both RFC2217 receive and transmit buffers before closing
+		// the TCP session. This prevents stale serial data/state from
+		// surviving the client disconnect on RFC2217 servers such as
+		// MikroTik.
+		//
+		// Do this after RTS_OFF so the VKT-7 interface is already released,
+		// but before TCP close so the server can process the command and
+		// return its acknowledgement.
+		_ = p.command(PURGE_DATA, []byte{PURGE_BOTH})
+
 		close(p.done)
 		_ = p.conn.Close()
 	})
