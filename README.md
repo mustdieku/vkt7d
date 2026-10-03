@@ -67,27 +67,3 @@ This avoids silently assigning a historical value to the wrong column after a sc
 ## Testing with a real device
 
 The repository does not include a hardware simulator. Before production use, connect a VKT-7 and inspect the first session with `--verbose`. The protocol document specifies a 264-byte maximum frame, a 62.5 ms frame boundary, 8N2, 1200/2400/4800/9600/19200 baud, and RTS >= +9 V for RS-232. The actual USB/RS-232 adapter must provide the required RTS electrical level.
-
-## Диагностика и тестирование
-
-Проект также содержит две отдельные утилиты:
-
-### vkt7check
-
-End-to-end проверка ВКТ-7 без записи архивов в PostgreSQL. Использует те же `config`, `protocol` и `storage`, что и демон. Проверяет PostgreSQL, RS-232, начало сеанса, время, служебную информацию, свойства, активные элементы, схемы, активную БД, текущие/итоговые текущие данные и архивы до текущей даты.
-
-```bash
-./vkt7check --port=/dev/ttyUSB0 --baud=19200 --address=7 \
-  --db-url='postgres://vkt7:vkt7@127.0.0.1:5432/vkt7?sslmode=disable'
-```
-
-### vkt7dbtest
-
-Проверяет PostgreSQL через функции хранилища демона. Без `--write` выполняется безопасная проверка соединения и схемы. С `--write` выполняется полный тест записи/чтения с последующей очисткой тестовых строк.
-
-```bash
-./vkt7dbtest --write --migrate \
-  --db-url='postgres://vkt7:vkt7@127.0.0.1:5432/vkt7?sslmode=disable'
-```
-
-Подробности: `README_TESTING.md`.
