@@ -18,17 +18,20 @@ type Collector struct {
 }
 
 func (x *Collector) Run(ctx context.Context) {
+	ticker := time.NewTicker(x.Cfg.Interval)
+	defer ticker.Stop()
+
 	for {
 		x.once(ctx)
-		t := time.NewTimer(x.Cfg.Interval)
+
 		select {
 		case <-ctx.Done():
-			t.Stop()
 			return
-		case <-t.C:
+		case <-ticker.C:
 		}
 	}
 }
+
 func (x *Collector) once(ctx context.Context) {
 	// DB first: Store was constructed only after a successful Ping. Verify again before serial.
 	if e := x.Store.Pool.Ping(ctx); e != nil {
@@ -112,16 +115,26 @@ func (x *Collector) once(ctx context.Context) {
 		return
 	}
 	x.Log.Debug("collector: active elements ready", "count", len(es))
+
 	// The report day is required for correct positioning of monthly and
 	// total archives.  0 means that it is not known yet.
-	reportDay, e = x.Store.ReportDay(ctx, id)
-	if e != nil {
-		x.Log.Warn("device report day", "error", e)
-		reportDay = 0
+	//
+	// Prefer the value returned by the meter during the current session.
+	// Only fall back to the database if the service record did not provide
+	// a valid value.
+	if reportDay < 1 || reportDay > 31 {
+		storedReportDay, err := x.Store.ReportDay(ctx, id)
+		if err != nil {
+			x.Log.Warn("device report day", "error", err)
+		} else {
+			reportDay = storedReportDay
+		}
 	}
+
 	if reportDay < 1 || reportDay > 31 {
 		reportDay = 30
 	}
+
 	if e = x.Store.UpsertActive(ctx, id, es); e != nil {
 		x.Log.Error("save active elements", "error", e)
 	}
@@ -142,15 +155,21 @@ func (x *Collector) once(ctx context.Context) {
 			x.Log.Warn("device metadata", "error", e)
 		}
 	}
-	// Use a compact list; only elements meaningful for the selected type are sent.
-	for _, job := range []struct {
-		typ   int
-		table string
-		step  time.Duration
-		batch int
-	}{{0, "hourly_archive", time.Hour, x.Cfg.BatchHourly}, {1, "daily_archive", 24 * time.Hour, x.Cfg.BatchDaily}, {2, "monthly_archive", 0, x.Cfg.BatchMonthly}, {3, "total_archive", 0, x.Cfg.BatchTotal}} {
-		x.collectArchive(ctx, c, id, es, job.typ, job.table, job.step, job.batch, reportDay, &archiveMeta)
+
+	for _, job := range x.archiveJobs() {
+		x.collectArchive(
+			ctx,
+			c,
+			id,
+			es,
+			job.typ,
+			job.table,
+			job.batch,
+			reportDay,
+			&archiveMeta,
+		)
 	}
+
 	if v, e := c.ReadCurrent(protocol.Current, filter(es, protocol.Current)); e == nil {
 		_ = x.Store.SaveCurrent(ctx, "current_values", id, v)
 	} else {
@@ -162,8 +181,24 @@ func (x *Collector) once(ctx context.Context) {
 		x.Log.Warn("current totals", "error", e)
 	}
 }
+
+type archiveJob struct {
+	typ   int
+	table string
+	batch int
+}
+
+func (x *Collector) archiveJobs() []archiveJob {
+	return []archiveJob{
+		{typ: protocol.Hourly, table: "hourly_archive", batch: x.Cfg.BatchHourly},
+		{typ: protocol.Daily, table: "daily_archive", batch: x.Cfg.BatchDaily},
+		{typ: protocol.Monthly, table: "monthly_archive", batch: x.Cfg.BatchMonthly},
+		{typ: protocol.Total, table: "total_archive", batch: x.Cfg.BatchTotal},
+	}
+}
+
 func filter(es []model.Element, typ int) []model.Element {
-	var out []model.Element
+	out := make([]model.Element, 0, len(es))
 	for _, e := range es {
 		if meaningful(e.Address, typ) {
 			out = append(out, e)
@@ -171,6 +206,7 @@ func filter(es []model.Element, typ int) []model.Element {
 	}
 	return out
 }
+
 func meaningful(a, typ int) bool {
 	switch typ {
 	case protocol.Hourly, protocol.Daily, protocol.Monthly:
@@ -185,7 +221,7 @@ func meaningful(a, typ int) bool {
 	return false
 }
 
-func (x *Collector) collectArchive(ctx context.Context, c *protocol.Client, id int64, active []model.Element, typ int, table string, step time.Duration, batch int, reportDay int, meta *model.Record) {
+func (x *Collector) collectArchive(ctx context.Context, c *protocol.Client, id int64, active []model.Element, typ int, table string, batch int, reportDay int, meta *model.Record) {
 	x.Log.Info("archive start", "table", table, "type", typ)
 
 	// VKT-7 protocol section 5.4 requires this order for every archive type:
@@ -264,7 +300,7 @@ func (x *Collector) collectArchive(ctx context.Context, c *protocol.Client, id i
 				// For monthly/total archives we must move to the next
 				// report date, not simply add one calendar month to an
 				// arbitrary day such as the first day of the month.
-				nextStart := advance(start, typ, reportDay)
+				nextStart := nextArchiveTime(start, typ, reportDay)
 				if !nextStart.After(start) {
 					x.Log.Warn("archive date did not advance",
 						"type", typ, "date", start)
@@ -292,7 +328,7 @@ func (x *Collector) collectArchive(ctx context.Context, c *protocol.Client, id i
 		if typ == protocol.Hourly {
 			start = start.Add(time.Hour)
 		} else {
-			start = next(start, typ, reportDay)
+			start = nextArchiveTime(start, typ, reportDay)
 		}
 	}
 }
@@ -497,17 +533,6 @@ func (x *Collector) readArchiveRecord(c *protocol.Client, typ int, when time.Tim
 	}
 }
 
-func advance(t time.Time, typ int, reportDay int) time.Time {
-	switch typ {
-	case protocol.Hourly:
-		return t.Add(time.Hour)
-	case protocol.Monthly, protocol.Total:
-		return monthReportDate(t, 1, reportDay)
-	default:
-		return t.AddDate(0, 0, 1)
-	}
-}
-
 // monthReportDate returns the report date for a month. VKT-7 stores monthly
 // archive records at the configured report day and hour 23. If a report day
 // is outside the month (e.g. 30 February), clamp it to the last day.
@@ -562,7 +587,7 @@ func due(t time.Time, typ int, now time.Time) bool {
 	}
 }
 
-func next(t time.Time, typ int, reportDay int) time.Time {
+func nextArchiveTime(t time.Time, typ int, reportDay int) time.Time {
 	switch typ {
 	case protocol.Hourly:
 		return t.Add(time.Hour)
@@ -592,7 +617,7 @@ func parseStart(d []byte, typ int, reportDay int) time.Time {
 		case protocol.Monthly, protocol.Total:
 			// Monthly and total archives use the report day. The
 			// daily archive start provides the earliest known month.
-			return monthReportDate(daily, 0, reportDay)
+			return monthReportDate(start, 0, reportDay)
 		}
 	}
 
@@ -664,5 +689,3 @@ func (x *Collector) collectProperties(ctx context.Context, c *protocol.Client, i
 	}
 	return x.Store.SaveProperties(ctx, id, v)
 }
-
-var _ = fmt.Sprintf

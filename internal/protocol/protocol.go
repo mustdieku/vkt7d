@@ -1,7 +1,6 @@
 package protocol
 
 import (
-	"bytes"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
@@ -749,6 +748,3 @@ func (c *Client) DebugRecord(v map[string]model.Value) string {
 	b, _ := json.Marshal(v)
 	return strings.TrimSpace(string(b))
 }
-
-var _ = bytes.Compare
-var _ = slog.Default

@@ -117,7 +117,6 @@ func (s *Store) SaveArchive(ctx context.Context, table string, id int64, t time.
 		sql = `INSERT INTO vkt7.hourly_archive(device_id,archive_time,scheme_tv1,scheme_tv2,active_db,"values",quality,ns,raw) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(device_id,archive_time) DO UPDATE SET scheme_tv1=excluded.scheme_tv1,scheme_tv2=excluded.scheme_tv2,active_db=excluded.active_db,"values"=excluded."values",quality=excluded.quality,ns=excluded.ns,raw=excluded.raw,collected_at=now()`
 		archiveKey = t
 	case "daily_archive", "monthly_archive", "total_archive":
-		sql = fmt.Sprintf(`INSERT INTO vkt7.%s(device_id,archive_date,scheme_tv1,scheme_tv2,active_db,"values",quality,ns,raw) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT(device_id,archive_date) DO UPDATE SET scheme_tv1=excluded.scheme_tv1,scheme_tv2=excluded.scheme_tv2,active_db=excluded.active_db,"values"=excluded."values",quality=excluded.quality,ns=excluded.ns,raw=excluded.raw,collected_at=now()`, table)
 		archiveKey = time.Date(
 			t.Year(),
 			t.Month(),
@@ -125,12 +124,53 @@ func (s *Store) SaveArchive(ctx context.Context, table string, id int64, t time.
 			0, 0, 0, 0,
 			t.Location(),
 		)
+		switch table {
+		case "daily_archive":
+			sql = archiveUpsertSQL("daily_archive")
+		case "monthly_archive":
+			sql = archiveUpsertSQL("monthly_archive")
+		case "total_archive":
+			sql = archiveUpsertSQL("total_archive")
+		}
 	default:
 		return fmt.Errorf("bad archive table %q", table)
 	}
 	_, e := s.Pool.Exec(ctx, sql, id, archiveKey, schemeTV1, schemeTV2, activeDB, vals, q, ns, raw)
 	return e
 }
+
+func archiveUpsertSQL(table string) string {
+	switch table {
+	case "hourly_archive":
+		return `INSERT INTO vkt7.hourly_archive(device_id,archive_time,scheme_tv1,scheme_tv2,active_db,"values",quality,ns,raw)
+			VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)
+			ON CONFLICT(device_id,archive_time) DO UPDATE SET
+			scheme_tv1=excluded.scheme_tv1,
+			scheme_tv2=excluded.scheme_tv2,
+			active_db=excluded.active_db,
+			"values"=excluded."values",
+			quality=excluded.quality,
+			ns=excluded.ns,
+			raw=excluded.raw,
+			collected_at=now()`
+
+	case "daily_archive", "monthly_archive", "total_archive":
+		return fmt.Sprintf(`INSERT INTO vkt7.%s(device_id,archive_date,scheme_tv1,scheme_tv2,active_db,"values",quality,ns,raw)
+			VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)
+			ON CONFLICT(device_id,archive_date) DO UPDATE SET
+			scheme_tv1=excluded.scheme_tv1,
+			scheme_tv2=excluded.scheme_tv2,
+			active_db=excluded.active_db,
+			"values"=excluded."values",
+			quality=excluded.quality,
+			ns=excluded.ns,
+			raw=excluded.raw,
+			collected_at=now()`, table)
+	}
+
+	return ""
+}
+
 func (s *Store) SaveProperties(ctx context.Context, id int64, v map[string]model.Value) error {
 	tx, err := s.Pool.Begin(ctx)
 	if err != nil {
@@ -187,9 +227,22 @@ func propertyAddress(name string) int {
 }
 func (s *Store) SaveCurrent(ctx context.Context, table string, id int64, v map[string]model.Value) error {
 	vals, q, ns, raw := encode(v)
-	_, e := s.Pool.Exec(ctx, fmt.Sprintf(`INSERT INTO vkt7.%s(device_id,"values",quality,ns,raw) VALUES($1,$2,$3,$4,$5)`, table), id, vals, q, ns, raw)
+	var sql string
+	switch table {
+	case "current_values":
+		sql = `INSERT INTO vkt7.current_values(device_id,"values",quality,ns,raw)
+			VALUES($1,$2,$3,$4,$5)`
+	case "current_totals":
+		sql = `INSERT INTO vkt7.current_totals(device_id,"values",quality,ns,raw)
+			VALUES($1,$2,$3,$4,$5)`
+	default:
+		return fmt.Errorf("bad current table %q", table)
+	}
+
+	_, e := s.Pool.Exec(ctx, sql, id, vals, q, ns, raw)
 	return e
 }
+
 func (s *Store) Last(ctx context.Context, table string, id int64) (*time.Time, error) {
 	var t time.Time
 	var err error
@@ -203,13 +256,29 @@ func (s *Store) Last(ctx context.Context, table string, id int64) (*time.Time, e
 			ORDER BY archive_time DESC
 			LIMIT 1`, id).Scan(&t)
 
-	case "daily_archive", "monthly_archive", "total_archive":
-		err = s.Pool.QueryRow(ctx, fmt.Sprintf(`
+	case "daily_archive":
+		err = s.Pool.QueryRow(ctx, `
 			SELECT archive_date::timestamp
-			FROM vkt7.%s
+			FROM vkt7.daily_archive
 			WHERE device_id=$1
 			ORDER BY archive_date DESC
-			LIMIT 1`, table), id).Scan(&t)
+			LIMIT 1`, id).Scan(&t)
+
+	case "monthly_archive":
+		err = s.Pool.QueryRow(ctx, `
+			SELECT archive_date::timestamp
+			FROM vkt7.monthly_archive
+			WHERE device_id=$1
+			ORDER BY archive_date DESC
+			LIMIT 1`, id).Scan(&t)
+
+	case "total_archive":
+		err = s.Pool.QueryRow(ctx, `
+			SELECT archive_date::timestamp
+			FROM vkt7.total_archive
+			WHERE device_id=$1
+			ORDER BY archive_date DESC
+			LIMIT 1`, id).Scan(&t)
 
 	default:
 		return nil, fmt.Errorf("bad archive table %q", table)
@@ -235,7 +304,28 @@ func (s *Store) Last(ctx context.Context, table string, id int64) (*time.Time, e
 }
 func (s *Store) CurrentLast(ctx context.Context, table string, id int64) (*time.Time, error) {
 	var t time.Time
-	e := s.Pool.QueryRow(ctx, fmt.Sprintf(`SELECT received_at FROM vkt7.%s WHERE device_id=$1 ORDER BY received_at DESC LIMIT 1`, table), id).Scan(&t)
+	var query string
+
+	switch table {
+	case "current_values":
+		query = `SELECT received_at
+			FROM vkt7.current_values
+			WHERE device_id=$1
+			ORDER BY received_at DESC
+			LIMIT 1`
+
+	case "current_totals":
+		query = `SELECT received_at
+			FROM vkt7.current_totals
+			WHERE device_id=$1
+			ORDER BY received_at DESC
+			LIMIT 1`
+
+	default:
+		return nil, fmt.Errorf("bad current table %q", table)
+	}
+
+	e := s.Pool.QueryRow(ctx, query, id).Scan(&t)
 	if errors.Is(e, pgx.ErrNoRows) {
 		return nil, nil
 	}
