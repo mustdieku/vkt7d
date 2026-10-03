@@ -266,7 +266,7 @@ func (x *Collector) collectArchive(ctx context.Context, c *protocol.Client, id i
 		}
 		start = parseStart(r, typ, reportDay)
 	} else {
-		start = next(*last, typ, reportDay)
+		start = nextArchiveTime(*last, typ, reportDay)
 		if x.Cfg.Overlap > 0 {
 			if typ == protocol.Hourly {
 				start = start.Add(-time.Duration(x.Cfg.Overlap) * time.Hour)
@@ -617,7 +617,7 @@ func parseStart(d []byte, typ int, reportDay int) time.Time {
 		case protocol.Monthly, protocol.Total:
 			// Monthly and total archives use the report day. The
 			// daily archive start provides the earliest known month.
-			return monthReportDate(start, 0, reportDay)
+			return monthReportDate(daily, 0, reportDay)
 		}
 	}
 
