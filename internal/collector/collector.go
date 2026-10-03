@@ -40,7 +40,12 @@ func (x *Collector) once(ctx context.Context) {
 		x.Log.Error("device row", "error", e)
 		return
 	}
-	port, e := protocol.Open(x.Cfg.Port, x.Cfg.Baud)
+    port, e := protocol.Open(
+        x.Cfg.Port,
+        x.Cfg.Baud,
+        x.Log,
+        x.Cfg.DebugSerial,
+    )
 	if e != nil {
 		x.Log.Error("open serial", "error", e)
 		x.Store.Log(ctx, id, "serial_error", e)

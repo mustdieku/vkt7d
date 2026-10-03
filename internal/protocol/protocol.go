@@ -700,9 +700,9 @@ func decodeSignedInt(b []byte) (int64, error) {
 	return x, nil
 }
 
-func Open(port string, baud int) (serial.Port, error) {
+func Open(port string, baud int, log *slog.Logger, debug bool) (serial.Port, error) {
 	if strings.HasPrefix(strings.ToLower(port), "rfc2217://") {
-		return rfc2217.Open(port, baud)
+        return rfc2217.Open(port, baud, log, debug)
 	}
 	m := &serial.Mode{
 		BaudRate: baud,
