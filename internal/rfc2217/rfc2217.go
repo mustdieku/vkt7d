@@ -605,6 +605,15 @@ func (p *Port) Break(d time.Duration) error {
 
 func (p *Port) Close() error {
 	p.closeOnce.Do(func() {
+		// VKT-7 requires RTS to be asserted during normal communication,
+		// but it must be released before disconnecting the RFC2217 session.
+		//
+		// Do this before closing p.done and the TCP connection: SetRTS(false)
+		// sends an RFC2217 SET_CONTROL command and waits for its
+		// acknowledgement. If the remote connection is already broken,
+		// the error is intentionally ignored because the TCP disconnect
+		// itself is the only remaining way to terminate the session.
+		_ = p.SetRTS(false)
 		close(p.done)
 		_ = p.conn.Close()
 	})
