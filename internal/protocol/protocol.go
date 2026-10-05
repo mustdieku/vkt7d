@@ -86,14 +86,68 @@ func (c *Client) tx(req []byte) ([]byte, error) {
 		return nil, fmt.Errorf("reset serial input buffer: %w", err)
 	}
 
-	txFrame := append([]byte{0xff, 0xff}, req...)
-	if c.Debug && c.Log != nil {
-		c.Log.Debug("vkt7 TX", "frame", fmt.Sprintf("%X", txFrame), "len", len(txFrame), "function", fmt.Sprintf("0x%02X", req[1]))
-	}
-	if _, e := c.Port.Write(txFrame); e != nil {
-		return nil, e
+	// RFC2217 servers may acknowledge PURGE_DATA before bytes already
+	// in the remote serial-server pipeline have reached the TCP client.
+	// Give the pipeline a short time to settle and drain data that arrived
+	// after the purge acknowledgement.
+	time.Sleep(20 * time.Millisecond)
+	if err := c.Port.ResetInputBuffer(); err != nil {
+		return nil, fmt.Errorf("settle/reset serial input buffer: %w", err)
 	}
 
+	const maxAttempts = 2
+
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		txFrame := append([]byte{0xff, 0xff}, req...)
+		if c.Debug && c.Log != nil {
+			c.Log.Debug(
+				"vkt7 TX",
+				"frame", fmt.Sprintf("%X", txFrame),
+				"len", len(txFrame),
+				"function", fmt.Sprintf("0x%02X", req[1]),
+				"attempt", attempt,
+			)
+		}
+
+		if _, e := c.Port.Write(txFrame); e != nil {
+			return nil, e
+		}
+
+		response, err := c.readResponse(req)
+		if err == nil {
+			return response, nil
+		}
+
+		lastErr = err
+
+		// A CRC error means that the complete frame was received, but the
+		// bytes do not match its CRC. Do not accept or repair such a frame.
+		// One retry is safe for the read-only/request-response protocol and
+		// handles transient corruption or stale bytes on RFC2217 links.
+		if !strings.HasPrefix(err.Error(), "CRC error in VKT-7 response:") ||
+			attempt == maxAttempts {
+			return nil, err
+		}
+
+		if c.Debug && c.Log != nil {
+			c.Log.Debug(
+				"vkt7 retry after CRC error",
+				"attempt", attempt,
+				"error", err,
+			)
+		}
+
+		if err := c.Port.ResetInputBuffer(); err != nil {
+			return nil, fmt.Errorf("reset serial input buffer after CRC error: %w", err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	return nil, lastErr
+}
+
+func (c *Client) readResponse(req []byte) ([]byte, error) {
 	deadline := time.Now().Add(c.Timeout)
 	var out []byte
 	buf := make([]byte, 264)
@@ -196,6 +250,7 @@ func (c *Client) ReadService() ([]byte, error) {
 	}
 	return dataPart(r), nil
 }
+
 // ServiceInfo is the version >= 1.5 service-information record returned by
 // register 0x3FF9. The protocol stores scheme numbers as little-endian
 // uint16 values and the report day as a single byte.
@@ -208,6 +263,7 @@ type ServiceInfo struct {
 	ReportDay  int
 	Model      int
 }
+
 func ParseService(d []byte) (ServiceInfo, error) {
 	if len(d) < 16 {
 		return ServiceInfo{}, fmt.Errorf("short service response: %x", d)
@@ -670,9 +726,9 @@ func ParseElements(es []model.Element, d []byte, typ int) (map[string]model.Valu
 //
 // Examples:
 //
-//   A8       -> -88
-//   A8 FF    -> -88
-//   A8 FF FF -> -88
+//	A8       -> -88
+//	A8 FF    -> -88
+//	A8 FF FF -> -88
 //
 // The last byte contains the sign bit of the encoded integer.
 func decodeSignedInt(b []byte) (int64, error) {
@@ -701,7 +757,7 @@ func decodeSignedInt(b []byte) (int64, error) {
 
 func Open(port string, baud int, log *slog.Logger, debug bool) (serial.Port, error) {
 	if strings.HasPrefix(strings.ToLower(port), "rfc2217://") {
-        return rfc2217.Open(port, baud, log, debug)
+		return rfc2217.Open(port, baud, log, debug)
 	}
 	m := &serial.Mode{
 		BaudRate: baud,

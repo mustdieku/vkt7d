@@ -11,7 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-    "log/slog"
+	"log/slog"
 	"net"
 	"net/url"
 	"sync"
@@ -127,8 +127,8 @@ type Port struct {
 	modemMu sync.RWMutex
 	modem   byte
 
-    log   *slog.Logger
-    debug bool
+	log   *slog.Logger
+	debug bool
 }
 
 // Open opens an RFC2217 endpoint. The endpoint syntax is:
@@ -168,15 +168,15 @@ func Open(address string, baud int, log *slog.Logger, debug bool) (*Port, error)
 		errCh:   make(chan error, 1),
 		done:    make(chan struct{}),
 		timeout: 250 * time.Millisecond,
-        log:     log,
-        debug:   debug,
+		log:     log,
+		debug:   debug,
 	}
 	if tcp, ok := conn.(*net.TCPConn); ok {
 		_ = tcp.SetNoDelay(true)
 	}
 
-    p.debugf("rfc2217 connected", "endpoint", host)
-    go p.reader()
+	p.debugf("rfc2217 connected", "endpoint", host)
+	go p.reader()
 	if err := p.negotiate(); err != nil {
 		_ = p.Close()
 		return nil, err
@@ -198,13 +198,13 @@ func Open(address string, baud int, log *slog.Logger, debug bool) (*Port, error)
 		_ = p.Close()
 		return nil, fmt.Errorf("RFC2217 RTS=true: %w", err)
 	}
-    p.debugf("rfc2217 open complete",
-        "baud", baud,
-        "data_bits", 8,
-        "stop_bits", 2,
-        "parity", "none",
-        "rts", true,
-    )
+	p.debugf("rfc2217 open complete",
+		"baud", baud,
+		"data_bits", 8,
+		"stop_bits", 2,
+		"parity", "none",
+		"rts", true,
+	)
 	return p, nil
 }
 
@@ -356,12 +356,12 @@ func (p *Port) reader() {
 	var sub []byte
 	for {
 		n, err := p.conn.Read(buf)
-        if n > 0 {
-            p.debugf("rfc2217 RX",
-                "data", fmt.Sprintf("%X", buf[:n]),
-                "len", n,
-            )
-        }
+		if n > 0 {
+			p.debugf("rfc2217 RX",
+				"data", fmt.Sprintf("%X", buf[:n]),
+				"len", n,
+			)
+		}
 		if err != nil {
 			select {
 			case p.errCh <- err:
@@ -415,10 +415,10 @@ func (p *Port) reader() {
 }
 
 func (p *Port) handleNegotiation(cmd, opt byte) {
-    p.debugf("rfc2217 negotiation RX",
-        "command", telnetCommandName(cmd),
-        "option", telnetOptionName(opt),
-    )
+	p.debugf("rfc2217 negotiation RX",
+		"command", telnetCommandName(cmd),
+		"option", telnetOptionName(opt),
+	)
 
 	switch cmd {
 	case DO:
@@ -441,10 +441,10 @@ func (p *Port) handleNegotiation(cmd, opt byte) {
 }
 
 func (p *Port) handleSubneg(v []byte) {
-    p.debugf("rfc2217 subnegotiation RX",
-        "data", fmt.Sprintf("%X", v),
-        "len", len(v),
-    )
+	p.debugf("rfc2217 subnegotiation RX",
+		"data", fmt.Sprintf("%X", v),
+		"len", len(v),
+	)
 
 	if len(v) < 2 || v[0] != COMPORT {
 		return
@@ -466,10 +466,10 @@ func (p *Port) handleSubneg(v []byte) {
 		}
 	}
 	if clientCmd != 0 {
-        p.debugf("rfc2217 command ACK",
-            "command", rfc2217CommandName(clientCmd),
-            "response", fmt.Sprintf("%X", v[1:]),
-        )
+		p.debugf("rfc2217 command ACK",
+			"command", rfc2217CommandName(clientCmd),
+			"response", fmt.Sprintf("%X", v[1:]),
+		)
 
 		if ch := p.acks[clientCmd]; ch != nil {
 			select {
@@ -492,10 +492,10 @@ func (p *Port) pushData(b []byte) {
 }
 
 func (p *Port) writeRaw(b []byte) error {
-    p.debugf("rfc2217 TX",
-        "data", fmt.Sprintf("%X", b),
-        "len", len(b),
-    )
+	p.debugf("rfc2217 TX",
+		"data", fmt.Sprintf("%X", b),
+		"len", len(b),
+	)
 
 	p.writeMu.Lock()
 	defer p.writeMu.Unlock()
@@ -589,6 +589,15 @@ func (p *Port) ResetInputBuffer() error {
 	if err := p.command(PURGE_DATA, []byte{PURGE_RECEIVE}); err != nil {
 		return err
 	}
+
+	// The RFC2217 server may acknowledge PURGE_DATA before bytes already
+	// transmitted by the remote serial device have reached the TCP socket.
+	// Drain the local decoded-data queue once more after a short settling
+	// interval. This is intentionally done here rather than in the VKT-7
+	// protocol layer so all users of the RFC2217 transport get the same
+	// RX synchronization semantics.
+	time.Sleep(20 * time.Millisecond)
+
 	for {
 		select {
 		case <-p.data:
@@ -603,7 +612,7 @@ func (p *Port) ResetOutputBuffer() error {
 }
 
 func (p *Port) SetRTS(v bool) error {
-    p.debugf("rfc2217 RTS", "value", v)
+	p.debugf("rfc2217 RTS", "value", v)
 
 	if v {
 		return p.command(SET_CONTROL, []byte{SET_CONTROL_RTS_ON})
@@ -647,7 +656,7 @@ func (p *Port) Break(d time.Duration) error {
 
 func (p *Port) Close() error {
 	p.closeOnce.Do(func() {
-        p.debugf("rfc2217 closing")
+		p.debugf("rfc2217 closing")
 
 		// VKT-7 requires RTS to be asserted during normal communication,
 		// but it must be released before disconnecting the RFC2217 session.
@@ -676,56 +685,56 @@ func (p *Port) Close() error {
 }
 
 func (p *Port) debugf(msg string, args ...any) {
-    if p.debug && p.log != nil {
-        p.log.Debug(msg, args...)
-    }
+	if p.debug && p.log != nil {
+		p.log.Debug(msg, args...)
+	}
 }
 
 func telnetCommandName(v byte) string {
-    switch v {
-    case WILL:
-        return "WILL"
-    case WONT:
-        return "WONT"
-    case DO:
-        return "DO"
-    case DONT:
-        return "DONT"
-    default:
-        return fmt.Sprintf("0x%02X", v)
-    }
+	switch v {
+	case WILL:
+		return "WILL"
+	case WONT:
+		return "WONT"
+	case DO:
+		return "DO"
+	case DONT:
+		return "DONT"
+	default:
+		return fmt.Sprintf("0x%02X", v)
+	}
 }
 
 func telnetOptionName(v byte) string {
-    switch v {
-    case BINARY:
-        return "BINARY"
-    case SGA:
-        return "SGA"
-    case COMPORT:
-        return "COM-PORT-OPTION"
-    default:
-        return fmt.Sprintf("0x%02X", v)
-    }
+	switch v {
+	case BINARY:
+		return "BINARY"
+	case SGA:
+		return "SGA"
+	case COMPORT:
+		return "COM-PORT-OPTION"
+	default:
+		return fmt.Sprintf("0x%02X", v)
+	}
 }
 
 func rfc2217CommandName(v byte) string {
-    switch v {
-    case SET_BAUDRATE:
-        return "SET_BAUDRATE"
-    case SET_DATASIZE:
-        return "SET_DATASIZE"
-    case SET_PARITY:
-        return "SET_PARITY"
-    case SET_STOPSIZE:
-        return "SET_STOPSIZE"
-    case SET_CONTROL:
-        return "SET_CONTROL"
-    case PURGE_DATA:
-        return "PURGE_DATA"
-    default:
-        return fmt.Sprintf("0x%02X", v)
-    }
+	switch v {
+	case SET_BAUDRATE:
+		return "SET_BAUDRATE"
+	case SET_DATASIZE:
+		return "SET_DATASIZE"
+	case SET_PARITY:
+		return "SET_PARITY"
+	case SET_STOPSIZE:
+		return "SET_STOPSIZE"
+	case SET_CONTROL:
+		return "SET_CONTROL"
+	case PURGE_DATA:
+		return "PURGE_DATA"
+	default:
+		return fmt.Sprintf("0x%02X", v)
+	}
 }
 
 var _ serial.Port = (*Port)(nil)
