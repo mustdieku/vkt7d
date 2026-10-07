@@ -43,7 +43,7 @@ from reportlab.lib.enums import TA_CENTER
 from reportlab.lib.pagesizes import A4, landscape
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
-from reportlab.platypus import PageBreak, Paragraph, SimpleDocTemplate, Table, TableStyle
+from reportlab.platypus import PageBreak, Paragraph, SimpleDocTemplate, Table, TableStyle, KeepTogether
 
 
 LOG = logging.getLogger("vkt7_report_db")
@@ -957,7 +957,6 @@ def create_pdf(
         ("TOPPADDING", (0, 0), (-1, 2), 4),
         ("BOTTOMPADDING", (0, 0), (-1, 2), 4),
     ]))
-    elements.append(table)
 
     # ------------------------------------------------------------------
     # Cumulative data for the report period.
@@ -1030,7 +1029,7 @@ def create_pdf(
 
     cumulative_table = Table(
         cumulative_table_data,
-        colWidths=[35 * mm, 45 * mm, 45 * mm, 45 * mm],
+        colWidths=[55 * mm, 65 * mm, 65 * mm, 65 * mm],
         hAlign="CENTER",
     )
     cumulative_table.setStyle(TableStyle([
@@ -1043,7 +1042,13 @@ def create_pdf(
         ("TOPPADDING", (0, 0), (-1, -1), 4),
         ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
     ]))
-    elements.append(cumulative_table)
+
+    elements.append(
+        KeepTogether([
+            table,
+            cumulative_table,
+        ])
+    )
 
     # ------------------------------------------------------------------ page 2
     elements.append(PageBreak())
