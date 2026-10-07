@@ -20,6 +20,21 @@ import (
 	"vkt7d/internal/rfc2217"
 )
 
+// VKT-7 Modbus-like function codes used by this implementation.
+const (
+	functionRead  byte = 0x03
+	functionWrite byte = 0x10
+)
+
+// VKT-7 frame and protocol constants.
+const (
+	maxFrameSize       = 264
+	requestPrefixSize  = 2
+	exceptionFrameSize = 6
+	writeResponseSize  = 8
+	requestPrefix      = byte(0xFF)
+)
+
 const (
 	RegActive    = 0x3FFC
 	RegDate      = 0x3FFB
@@ -59,6 +74,7 @@ func (e *CRCError) Error() string {
 	return fmt.Sprintf("CRC error in VKT-7 response: %X", e.Frame)
 }
 
+// CRC16 calculates the CRC-16 used by VKT-7.
 func CRC16(b []byte) uint16 {
 	crc := uint16(0xffff)
 	for _, x := range b {
@@ -73,16 +89,28 @@ func CRC16(b []byte) uint16 {
 	}
 	return crc
 }
+
+// frame builds a complete VKT-7 request frame.
+//
+// The frame layout is:
+//
+//	address | function | register | quantity | payload | CRC
+//
+// The two leading 0xFF bytes required by the physical VKT-7 interface are
+// added by tx(), not stored in the protocol frame itself.
 func frame(addr byte, fn byte, reg uint16, qty uint16, payload []byte) []byte {
 	b := []byte{addr, fn, byte(reg >> 8), byte(reg), byte(qty >> 8), byte(qty)}
 	b = append(b, payload...)
 	c := CRC16(b)
 	return append(b, byte(c), byte(c>>8))
 }
+
+// tx executes one VKT-7 request/response transaction.
+//
+// Input buffering is cleared before the request because VKT-7 does not
+// provide a transaction identifier. Bytes left over from a previous
+// transaction therefore cannot safely be associated with a new request.
 func (c *Client) tx(req []byte) ([]byte, error) {
-	// A serial Read must not be allowed to block longer than the protocol
-	// operation timeout. go.bug.st/serial exposes SetReadTimeout for this;
-	// the overall deadline below still bounds the complete transaction.
 	readTimeout := 250 * time.Millisecond
 	if c.Timeout > 0 && c.Timeout < readTimeout {
 		readTimeout = c.Timeout
@@ -91,17 +119,10 @@ func (c *Client) tx(req []byte) ([]byte, error) {
 		return nil, fmt.Errorf("set serial read timeout: %w", err)
 	}
 
-	// Drop stale bytes from a previous failed/partial transaction. A VKT-7
-	// frame is requested atomically, so bytes already in the RX queue cannot
-	// be safely attached to the new request.
 	if err := c.Port.ResetInputBuffer(); err != nil {
 		return nil, fmt.Errorf("reset serial input buffer: %w", err)
 	}
 
-	// RFC2217 servers may acknowledge PURGE_DATA before bytes already
-	// in the remote serial-server pipeline have reached the TCP client.
-	// Give the pipeline a short time to settle and drain data that arrived
-	// after the purge acknowledgement.
 	time.Sleep(20 * time.Millisecond)
 	if err := c.Port.ResetInputBuffer(); err != nil {
 		return nil, fmt.Errorf("settle/reset serial input buffer: %w", err)
@@ -111,7 +132,7 @@ func (c *Client) tx(req []byte) ([]byte, error) {
 
 	var lastErr error
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		txFrame := append([]byte{0xff, 0xff}, req...)
+		txFrame := append([]byte{requestPrefix, requestPrefix}, req...)
 		if c.Debug && c.Log != nil {
 			c.Log.Debug(
 				"vkt7 TX",
@@ -133,10 +154,6 @@ func (c *Client) tx(req []byte) ([]byte, error) {
 
 		lastErr = err
 
-		// A CRC error means that the complete frame was received, but the
-		// bytes do not match its CRC. Do not accept or repair such a frame.
-		// One retry is safe for the read-only/request-response protocol and
-		// handles transient corruption or stale bytes on RFC2217 links.
 		var crcErr *CRCError
 		if !errors.As(err, &crcErr) || attempt == maxAttempts {
 			return nil, err
@@ -159,10 +176,75 @@ func (c *Client) tx(req []byte) ([]byte, error) {
 	return nil, lastErr
 }
 
+// responseLength returns the expected VKT-7 response length once enough
+// header bytes are available to determine it.
+func responseLength(requestFunction byte, response []byte) (int, bool, error) {
+	if len(response) < 2 {
+		return 0, false, nil
+	}
+
+	// VKT-7 exceptions have a fixed six-byte response:
+	//
+	//	address | function|0x80 | exception | service | CRC
+	if response[1]&0x80 != 0 {
+		if len(response) >= exceptionFrameSize {
+			return exceptionFrameSize, true, nil
+		}
+		return 0, false, nil
+	}
+
+	switch requestFunction {
+	case functionRead:
+		if len(response) < 3 {
+			return 0, false, nil
+		}
+		n := int(response[2]) + 5
+		if n > maxFrameSize {
+			return 0, false, fmt.Errorf("VKT-7 response exceeds maximum frame size: %d", n)
+		}
+		return n, true, nil
+
+	case functionWrite:
+		return writeResponseSize, true, nil
+
+	default:
+		return 0, false, fmt.Errorf(
+			"unsupported VKT-7 function: 0x%02X",
+			requestFunction,
+		)
+	}
+}
+
+// validateResponse validates a complete VKT-7 response frame.
+func validateResponse(frame []byte, expected int) error {
+	if len(frame) != expected {
+		return fmt.Errorf(
+			"invalid VKT-7 response length: got=%d want=%d raw=%X",
+			len(frame),
+			expected,
+			frame,
+		)
+	}
+
+	if len(frame) < 2 {
+		return fmt.Errorf("VKT-7 response is too short: %d", len(frame))
+	}
+
+	got := binary.LittleEndian.Uint16(frame[len(frame)-2:])
+	want := CRC16(frame[:len(frame)-2])
+	if got != want {
+		return &CRCError{
+			Frame: append([]byte(nil), frame...),
+		}
+	}
+
+	return nil
+}
+
 func (c *Client) readResponse(req []byte) ([]byte, error) {
 	deadline := time.Now().Add(c.Timeout)
 	var out []byte
-	buf := make([]byte, 264)
+	buf := make([]byte, maxFrameSize)
 
 	for time.Now().Before(deadline) {
 		n, e := c.Port.Read(buf)
@@ -181,82 +263,74 @@ func (c *Client) readResponse(req []byte) ([]byte, error) {
 
 		out = append(out, buf[:n]...)
 
-		// VKT-7 exception response:
-		//   address, function|0x80, error code, service byte, CRC-lo, CRC-hi
-		// i.e. exactly 6 bytes. The previous implementation waited for at
-		// least 7 bytes and therefore converted a valid exception response
-		// into a timeout.
-		if len(out) >= 2 && out[1]&0x80 != 0 {
-			if len(out) >= 6 {
-				if len(out) == 6 {
-					csum := CRC16(out[:4])
-					if out[4] == byte(csum) && out[5] == byte(csum>>8) {
-						return out, nil
-					}
-				}
-				if len(out) > 6 {
-					return nil, fmt.Errorf("invalid VKT-7 exception frame: %X", out)
-				}
-			}
+		if len(out) > maxFrameSize {
+			return nil, fmt.Errorf(
+				"VKT-7 response exceeds maximum frame size: %d",
+				len(out),
+			)
+		}
+
+		expected, ready, err := responseLength(req[1], out)
+		if err != nil {
+			return nil, err
+		}
+		if !ready {
 			continue
 		}
 
-		// Normal response depends on the function code.
-		// 0x03 ("read") uses: address, function, byte-count, data..., CRC-lo, CRC-hi.
-		// 0x10 ("write") uses the standard fixed 8-byte confirmation:
-		// address, function, start-address(2), register-count(2), CRC-lo, CRC-hi.
-		// The previous implementation treated every normal response as 0x03.
-		// That makes a valid 0x10 response such as
-		//   07 10 3F FF 00 00 FC 4B
-		// look as if it contained 0x3F data bytes and causes a timeout.
-		var expected int
-		switch req[1] {
-		case 0x03:
-			if len(out) >= 3 {
-				expected = int(out[2]) + 5
-			}
-		case 0x10:
-			expected = 8
-		default:
-			return nil, fmt.Errorf("unsupported VKT-7 function in response: 0x%02X", req[1])
+		if len(out) < expected {
+			continue
 		}
-		if expected > 264 {
-			return nil, fmt.Errorf("frame exceeds 264 bytes")
+
+		if len(out) > expected {
+			return nil, fmt.Errorf(
+				"VKT-7 response contains trailing bytes: got=%d want=%d raw=%X",
+				len(out),
+				expected,
+				out,
+			)
 		}
-		if expected > 0 && len(out) >= expected {
-			if len(out) != expected {
-				return nil, fmt.Errorf("invalid VKT-7 response length: got=%d want=%d raw=%X", len(out), expected, out)
-			}
-			csum := CRC16(out[:expected-2])
-			if out[expected-2] == byte(csum) && out[expected-1] == byte(csum>>8) {
-				if c.Debug && c.Log != nil {
-					c.Log.Debug("vkt7 RX", "frame", fmt.Sprintf("%X", out), "len", len(out), "function", fmt.Sprintf("0x%02X", out[1]), "data_len", expected-5)
-				}
-				return out, nil
-			}
+
+		if err := validateResponse(out, expected); err != nil {
 			if c.Debug && c.Log != nil {
-				c.Log.Debug("vkt7 RX CRC ERROR", "frame", fmt.Sprintf("%X", out), "len", len(out))
+				c.Log.Debug("vkt7 RX CRC ERROR",
+					"frame", fmt.Sprintf("%X", out),
+					"len", len(out),
+				)
 			}
-			return nil, &CRCError{
-				Frame: append([]byte(nil), out...),
-			}
+			return nil, err
 		}
+
+		if c.Debug && c.Log != nil {
+			c.Log.Debug(
+				"vkt7 RX",
+				"frame", fmt.Sprintf("%X", out),
+				"len", len(out),
+				"function", fmt.Sprintf("0x%02X", out[1]),
+			)
+		}
+		return out, nil
 	}
+
 	if c.Debug && c.Log != nil {
 		c.Log.Debug("vkt7 RX TIMEOUT", "partial", fmt.Sprintf("%X", out), "len", len(out))
 	}
 	return nil, fmt.Errorf("timeout waiting for VKT-7 response; tx=%s rx=%s", hex.EncodeToString(req), hex.EncodeToString(out))
 }
+
 func (c *Client) read(reg uint16, qty uint16) ([]byte, error) {
-	return c.tx(frame(c.Address, 0x03, reg, qty, nil))
+	return c.tx(frame(c.Address, functionRead, reg, qty, nil))
 }
+
 func (c *Client) write(reg uint16, qty uint16, payload []byte) ([]byte, error) {
-	return c.tx(frame(c.Address, 0x10, reg, qty, payload))
+	return c.tx(frame(c.Address, functionWrite, reg, qty, payload))
 }
+
 func (c *Client) Begin() error {
 	_, e := c.write(RegReadList, 0, []byte{0xcc, 0x80, 0, 0, 0})
 	return e
 }
+
 func (c *Client) ReadService() ([]byte, error) {
 	r, e := c.read(RegService, 0)
 	if e != nil {
@@ -265,9 +339,9 @@ func (c *Client) ReadService() ([]byte, error) {
 	return dataPart(r), nil
 }
 
-// ServiceInfo is the version >= 1.5 service-information record returned by
-// register 0x3FF9. The protocol stores scheme numbers as little-endian
-// uint16 values and the report day as a single byte.
+// ServiceInfo describes the service-information record returned by register
+// 0x3FF9 on VKT-7 firmware versions that support the documented service
+// information format.
 type ServiceInfo struct {
 	Firmware   int
 	SchemeTV1  int
@@ -278,6 +352,7 @@ type ServiceInfo struct {
 	Model      int
 }
 
+// ParseService decodes the fixed-size service-information payload.
 func ParseService(d []byte) (ServiceInfo, error) {
 	if len(d) < 16 {
 		return ServiceInfo{}, fmt.Errorf("short service response: %x", d)
@@ -292,6 +367,8 @@ func ParseService(d []byte) (ServiceInfo, error) {
 		Model:      int(d[15]),
 	}, nil
 }
+
+// ReadRange returns the archive range information reported by the device.
 func (c *Client) ReadRange() ([]byte, error) {
 	r, e := c.read(RegRange, 0)
 	if e != nil {
@@ -300,6 +377,7 @@ func (c *Client) ReadRange() ([]byte, error) {
 	return dataPart(r), nil
 }
 
+// ReadScheme reads the tariff/measurement scheme identifier for TV1 or TV2.
 func (c *Client) ReadScheme(tv int) (byte, byte, byte, error) {
 	reg := uint16(0x3ECD)
 	if tv == 2 {
@@ -316,6 +394,7 @@ func (c *Client) ReadScheme(tv int) (byte, byte, byte, error) {
 	return d[0], d[1], d[2], nil
 }
 
+// ReadActiveDB reads the currently selected archive database identifier.
 func (c *Client) ReadActiveDB() (byte, byte, byte, error) {
 	r, err := c.read(0x3FE9, 1)
 	if err != nil {
@@ -328,6 +407,7 @@ func (c *Client) ReadActiveDB() (byte, byte, byte, error) {
 	return d[0], d[1], d[2], nil
 }
 
+// ReadSubscriberID reads the subscriber identifier and its quality metadata.
 func (c *Client) ReadSubscriberID() ([]byte, byte, byte, error) {
 	r, err := c.read(0x3EA6, 8)
 	if err != nil {
@@ -337,16 +417,24 @@ func (c *Client) ReadSubscriberID() ([]byte, byte, byte, error) {
 	if len(d) < 4 {
 		return nil, 0, 0, fmt.Errorf("bad subscriber response: %x", d)
 	}
-	// The response contains a VT string structure followed by quality and NS.
-	if len(d) < 2 {
-		return nil, 0, 0, fmt.Errorf("short subscriber response: %x", d)
-	}
+
+	// The subscriber value is encoded as a length-prefixed byte string,
+	// followed by quality and NS bytes.
 	n := int(binary.LittleEndian.Uint16(d[:2]))
-	if n < 0 || 2+n+2 > len(d) {
+	if 2+n+2 > len(d) {
 		return nil, 0, 0, fmt.Errorf("invalid subscriber length %d: %x", n, d)
 	}
 	return append([]byte(nil), d[2:2+n]...), d[2+n], d[2+n+1], nil
 }
+
+// dataPart extracts the payload from a normal VKT-7 read response.
+//
+// A normal read response is:
+//
+//	address | function | byte-count | data | CRC
+//
+// Exception frames are returned unchanged so that parseException can inspect
+// the exception code.
 func dataPart(r []byte) []byte {
 	if len(r) < 5 {
 		return nil
@@ -355,14 +443,7 @@ func dataPart(r []byte) []byte {
 		return r
 	}
 	n := int(r[2])
-	// A normal 0x03 response has an explicit byte-count. In particular,
-	// byte-count == 0 is valid and must produce an empty data section rather
-	// than accidentally returning the two CRC bytes as data.
 	if n+5 <= len(r) {
-		if n+5 == len(r) {
-			return r[3 : 3+n]
-		}
-		// Be conservative if a transport backend returned trailing bytes.
 		return r[3 : 3+n]
 	}
 	return nil
@@ -377,10 +458,12 @@ type ExceptionError struct {
 	Function byte
 }
 
+// Error implements error.
 func (e *ExceptionError) Error() string {
 	return fmt.Sprintf("VKT-7 exception code=%d", e.Code)
 }
 
+// IsExceptionCode reports whether err contains the specified VKT-7 exception.
 func IsExceptionCode(err error, code byte) bool {
 	if code == 3 && IsArchiveDateMissing(err) {
 		return true
@@ -390,22 +473,21 @@ func IsExceptionCode(err error, code byte) bool {
 	return errors.As(err, &ex) && ex.Code == code
 }
 
-// ErrArchiveDateMissing is returned when the VKT-7 explicitly reports
-// exception code 3 for the requested archive date.
+// ErrArchiveDateMissing represents VKT-7 exception code 3.
 //
-// This is not a transport/protocol failure. The protocol documentation
-// defines exception 3 as "no data in the archive for the specified date".
+// It is a semantic archive condition rather than a transport failure: the
+// requested archive date does not contain a record.
 var ErrArchiveDateMissing = errors.New("VKT-7 archive date has no data")
 
+// IsArchiveDateMissing reports whether err represents a missing archive date.
 func IsArchiveDateMissing(err error) bool {
 	return errors.Is(err, ErrArchiveDateMissing)
 }
 
+// parseException converts a valid VKT-7 exception response into a typed error.
 func parseException(r []byte) error {
 	if len(r) >= 3 && r[1]&0x80 != 0 {
 		if r[2] == 3 {
-			// Preserve both meanings: code 3 is an archive-date exception and
-			// it is also the semantic "date is absent" condition.
 			return fmt.Errorf("%w: %w", ErrArchiveDateMissing, &ExceptionError{
 				Code:     3,
 				Function: r[1] & 0x7f,
@@ -416,6 +498,7 @@ func parseException(r []byte) error {
 	return nil
 }
 
+// ReadDeviceTime reads the current date and time from the meter.
 func (c *Client) ReadDeviceTime() (time.Time, error) {
 	r, e := c.read(RegDate, 0)
 	if e != nil {
@@ -429,6 +512,7 @@ func (c *Client) ReadDeviceTime() (time.Time, error) {
 	return time.Date(y, time.Month(d[1]), int(d[0]), int(d[3]), int(d[4]), int(d[5]), 0, time.Local), nil
 }
 
+// SetType selects the VKT-7 value/archive type used by subsequent operations.
 func (c *Client) SetType(t byte) error {
 	r, e := c.write(RegValueType, 0, []byte{2, t, 0})
 	if e != nil {
@@ -436,13 +520,16 @@ func (c *Client) SetType(t byte) error {
 	}
 	return parseException(r)
 }
+
+// SetDate selects the archive timestamp used by the next ReadData operation.
 func (c *Client) SetDate(t time.Time, dailyLike bool) error {
 	hour := byte(t.Hour())
 	if dailyLike {
 		hour = 23
 	}
-	// VKT-7 function 0x10 requires the byte-count field before the payload.
-	// The date payload itself is exactly 4 bytes: day, month, year-2000, hour.
+
+	// The write payload contains a byte-count followed by:
+	// day, month, year-2000 and hour.
 	r, e := c.write(RegDate, 0, []byte{
 		4,
 		byte(t.Day()),
@@ -455,6 +542,10 @@ func (c *Client) SetDate(t time.Time, dailyLike bool) error {
 	}
 	return parseException(r)
 }
+
+// ActiveElements reads the device-defined list of active logical elements.
+//
+// Each entry consists of a 32-bit logical address and a 16-bit element size.
 func (c *Client) ActiveElements() ([]model.Element, error) {
 	r, e := c.read(RegActive, 0)
 	if e != nil {
@@ -486,9 +577,8 @@ func (c *Client) ActiveElements() ([]model.Element, error) {
 	var es []model.Element
 
 	for i := 0; i+6 <= len(d); i += 6 {
-		// The active-element list contains the logical address directly.
-		// 0x40000000 is required only when constructing the read-list
-		// written to register 0x3FFF (protocol section 4.2).
+		// The active-element response contains the logical address. The
+		// 0x40000000 flag is added only when building the read-list request.
 		a := int(binary.LittleEndian.Uint32(d[i:i+4]) & 0x3FFFFFFF)
 		sz := int(binary.LittleEndian.Uint16(d[i+4 : i+6]))
 
@@ -509,6 +599,11 @@ func (c *Client) ActiveElements() ([]model.Element, error) {
 
 	return es, nil
 }
+
+// makeReadListPayload serializes active elements into the VKT-7 read-list
+// representation.
+//
+// Each element is encoded as address|0x40000000 followed by its size.
 func makeReadListPayload(es []model.Element) ([]byte, error) {
 	p := make([]byte, 0, len(es)*6)
 	for _, e := range es {
@@ -518,8 +613,7 @@ func makeReadListPayload(es []model.Element) ([]byte, error) {
 		binary.LittleEndian.PutUint16(x[4:], uint16(e.Size))
 		p = append(p, x...)
 	}
-	// Function 0x10 has a byte-count field before the actual payload.
-	// VKT-7 explicitly requires this for the read-list request.
+
 	if len(p) > 255 {
 		return nil, fmt.Errorf("read list payload too large: %d bytes", len(p))
 	}
@@ -529,6 +623,7 @@ func makeReadListPayload(es []model.Element) ([]byte, error) {
 	return payload, nil
 }
 
+// SetReadList writes the element list used by subsequent ReadData operations.
 func (c *Client) SetReadList(es []model.Element) error {
 	payload, err := makeReadListPayload(es)
 	if err != nil {
@@ -541,6 +636,7 @@ func (c *Client) SetReadList(es []model.Element) error {
 	return parseException(r)
 }
 
+// ReadData reads the record prepared by SetType, SetReadList and SetDate.
 func (c *Client) ReadData() ([]byte, error) {
 	r, e := c.read(RegReadData, 0)
 	if e != nil {
@@ -556,9 +652,8 @@ func (c *Client) ReadData() ([]byte, error) {
 	return d, nil
 }
 
-// PrepareArchive performs the type/read-list part of the archive protocol.
-// It is separate from ReadArchiveData so sequential records do not repeat
-// two write operations for every timestamp.
+// PrepareArchive configures the value type and read list before reading
+// multiple records of the same archive type.
 func (c *Client) PrepareArchive(typ int, es []model.Element) error {
 	if err := c.SetType(byte(typ)); err != nil {
 		return err
@@ -566,7 +661,7 @@ func (c *Client) PrepareArchive(typ int, es []model.Element) error {
 	return c.SetReadList(es)
 }
 
-// ReadArchiveData reads one record after PrepareArchive has been called.
+// ReadArchiveData selects the timestamp and reads one prepared archive record.
 func (c *Client) ReadArchiveData(typ int, when time.Time, es []model.Element) (map[string]model.Value, error) {
 	if err := c.SetDate(when, typ == Daily || typ == Monthly || typ == Total); err != nil {
 		return nil, err
@@ -577,6 +672,8 @@ func (c *Client) ReadArchiveData(typ int, when time.Time, es []model.Element) (m
 	}
 	return ParseElements(es, d, typ)
 }
+
+// ElementName maps a VKT-7 logical element address to its application name.
 func ElementName(a int) string {
 	names := []string{"t1_1", "t2_1", "t3_1", "V1_1", "V2_1", "V3_1", "M1_1", "M2_1", "M3_1", "P1_1", "P2_1", "Mg_1", "Qo_1", "Qg_1", "dt_1", "tx", "ta", "BNP_1", "VOC_1", "G1_1", "G2_1", "G3_1", "t1_2", "t2_2", "t3_2", "V1_2", "V2_2", "V3_2", "M1_2", "M2_2", "M3_2", "P1_2", "P2_2", "Mg_2", "Qo_2", "Qg_2", "dt_2", "reserved_37", "reserved_38", "BNP_2", "VOC_2", "G1_2", "G2_2", "G3_2", "t_unit", "G_unit", "V_unit", "M_unit", "P_unit", "dt_unit", "tx_unit", "ta_unit", "Mg_unit", "Qo_unit", "Qg_unit", "BNP_unit", "VOC_unit", "t_dec", "G_dec_reserved", "V1_dec", "M1_dec", "P1_dec", "dt_dec", "tx_dec", "ta_dec", "Mg_dec", "Qo1_dec", "t2_dec_reserved", "G2_dec_reserved", "V2_dec", "M2_dec", "P2_dec", "dt2_dec", "tx2_dec", "ta2_dec", "Mg2_dec", "Qo2_dec", "NS_1", "NS_2", "QntNS_1", "QntNS_2", "DI", "P3"}
 	if a >= 0 && a < len(names) {
@@ -585,11 +682,15 @@ func ElementName(a int) string {
 	return "element_" + strconv.Itoa(a)
 }
 
-// ParseProperties parses the special VKT-7 properties response used when
-// server version is 1. Unlike ordinary data elements, properties do not form
-// a fixed-size stream of size+quality+NS records. Unit properties are encoded
-// as: uint16 string length (LE) + OEM/CP866 string + quality + NS.
-// Fraction-digit properties are: value + quality + NS.
+// ParseProperties decodes the special properties record.
+//
+// Properties are not encoded like ordinary elements. Unit properties use:
+//
+//	uint16 string length (LE) | string bytes | quality | NS
+//
+// Fraction-digit properties use:
+//
+//	uint8 value | quality | NS
 func ParseProperties(es []model.Element, d []byte) (map[string]model.Value, error) {
 	if len(es) != 16 {
 		return nil, fmt.Errorf("unexpected properties element count: %d", len(es))
@@ -651,6 +752,67 @@ func ParseProperties(es []model.Element, d []byte) (map[string]model.Value, erro
 	return out, nil
 }
 
+// decodeElementValue converts the raw value bytes of one ordinary VKT-7
+// element into its Go representation.
+//
+// The decoding rule is determined by the logical element address. The byte
+// width is still taken from the active-element list for signed integers.
+func decodeElementValue(e model.Element, raw []byte) (any, error) {
+	switch e.Address {
+	case 77, 78:
+		// NSPrintTypeM_1/2 are single printable characters.
+		return string(raw), nil
+
+	case 79, 80:
+		// QntNS_1/2 contain five unsigned 16-bit counters.
+		if len(raw) != 10 {
+			return nil, fmt.Errorf(
+				"invalid element %d (%s) size: got %d, want 10",
+				e.Address, e.Name, len(raw),
+			)
+		}
+
+		values := make([]uint16, 5)
+		for i := range values {
+			values[i] = binary.LittleEndian.Uint16(raw[i*2 : i*2+2])
+		}
+		return values, nil
+
+	case 19, 20, 21, 41, 42, 43, 81:
+		// G1/G2/G3 and DopInpImpP_Type are IEEE-754 float32 values.
+		if len(raw) != 4 {
+			return nil, fmt.Errorf(
+				"invalid float32 element %d (%s) size: got %d, want 4",
+				e.Address, e.Name, len(raw),
+			)
+		}
+		return math.Float32frombits(binary.LittleEndian.Uint32(raw)), nil
+
+	case 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56:
+		// Unit properties are decoded by ParseProperties when the device
+		// returns the properties record. In an ordinary element stream they
+		// remain byte strings.
+		return string(raw), nil
+
+	case 57, 58, 59, 60, 61, 62, 63, 64, 65, 66,
+		67, 68, 69, 70, 71, 72, 73, 74, 75, 76:
+		// Fraction-digit properties are unsigned 8-bit values.
+		if len(raw) != 1 {
+			return nil, fmt.Errorf(
+				"invalid uint8 property %d (%s) size: got %d, want 1",
+				e.Address, e.Name, len(raw),
+			)
+		}
+		return uint8(raw[0]), nil
+
+	default:
+		// Ordinary numeric elements are signed integers. Their width is
+		// defined by the active-element list, so sign extension must be based
+		// on len(raw), not on a fixed integer type.
+		return decodeSignedInt(raw)
+	}
+}
+
 func ParseElements(es []model.Element, d []byte, typ int) (map[string]model.Value, error) {
 	out := map[string]model.Value{}
 	off := 0
@@ -658,93 +820,43 @@ func ParseElements(es []model.Element, d []byte, typ int) (map[string]model.Valu
 		if off+e.Size+2 > len(d) {
 			return nil, fmt.Errorf("short data at element %d: need %d bytes, have %d", e.Address, e.Size+2, len(d)-off)
 		}
+
 		raw := append([]byte(nil), d[off:off+e.Size]...)
 		q := d[off+e.Size]
 		ns := d[off+e.Size+1]
 		off += e.Size + 2
 
-		var v any
-		switch e.Address {
-		case 77, 78:
-			// NSPrintTypeM_1/2 are single printable characters.
-			v = string(raw)
-
-		case 79, 80:
-			// QntNS_1/2 are five unsigned 16-bit counters.
-			if len(raw) != 10 {
-				return nil, fmt.Errorf(
-					"invalid element %d (%s) size: got %d, want 10",
-					e.Address, e.Name, len(raw),
-				)
-			}
-			x := make([]uint16, 5)
-			for i := range x {
-				x[i] = binary.LittleEndian.Uint16(raw[i*2 : i*2+2])
-			}
-			v = x
-
-		case 19, 20, 21, 41, 42, 43, 81:
-			// G1/G2/G3 and DopInpImpP_Type are IEEE-754 float32.
-			if len(raw) != 4 {
-				return nil, fmt.Errorf(
-					"invalid float32 element %d (%s) size: got %d, want 4",
-					e.Address, e.Name, len(raw),
-				)
-			}
-			v = math.Float32frombits(binary.LittleEndian.Uint32(raw))
-
-		case 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56:
-			// Unit properties are handled by ParseProperties for the
-			// properties response. They must not be interpreted as integers
-			// in the ordinary element stream.
-			v = string(raw)
-
-		case 57, 58, 59, 60, 61, 62, 63, 64, 65, 66,
-			67, 68, 69, 70, 71, 72, 73, 74, 75, 76:
-			// Fraction-digit properties are unsigned 8-bit values.
-			if len(raw) != 1 {
-				return nil, fmt.Errorf(
-					"invalid uint8 property %d (%s) size: got %d, want 1",
-					e.Address, e.Name, len(raw),
-				)
-			}
-			v = uint8(raw[0])
-
-		default:
-			// All ordinary numeric VKT-7 elements use a signed integer
-			// representation. The actual width is supplied by the active
-			// element list (e.Size), so this must be sign-extended according
-			// to the element size instead of being decoded as uintN.
-			var err error
-			v, err = decodeSignedInt(raw)
-			if err != nil {
-				return nil, fmt.Errorf(
-					"decode element %d (%s): %w",
-					e.Address, e.Name, err,
-				)
-			}
+		v, err := decodeElementValue(e, raw)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"decode element %d (%s): %w",
+				e.Address, e.Name, err,
+			)
 		}
+
 		out[e.Name] = model.Value{Value: v, Quality: q, NS: ns, Raw: raw}
 	}
-	if off != len(d) && typ != Properties { /* tolerate extra service bytes */
-	}
+
+	// typ is retained in the public API because callers use the same parser
+	// for all archive types. The ordinary element stream itself does not
+	// require different decoding rules based on typ.
+	_ = typ
+
 	return out, nil
 }
 
-// decodeSignedInt decodes an ordinary VKT-7 numeric element as a little-endian
-// signed integer and performs proper sign extension.
+// decodeSignedInt decodes a little-endian signed integer with the width
+// specified by the supplied byte slice.
 //
-// The protocol does not use one fixed integer width for all ordinary
-// parameters: the size is supplied by the active-elements table. Therefore
-// this function accepts 1..8 bytes rather than assuming uint16/uint32.
+// VKT-7 uses different integer widths for different logical elements. The
+// active-element list supplies the width, so the value must be sign-extended
+// from that exact width.
 //
 // Examples:
 //
-//	A8       -> -88
-//	A8 FF    -> -88
-//	A8 FF FF -> -88
-//
-// The last byte contains the sign bit of the encoded integer.
+//	0xA8       -> -88
+//	0xA8 0xFF  -> -88
+//	0xA8 0xFF 0xFF -> -88
 func decodeSignedInt(b []byte) (int64, error) {
 	if len(b) == 0 {
 		return 0, fmt.Errorf("empty signed integer")
@@ -769,6 +881,7 @@ func decodeSignedInt(b []byte) (int64, error) {
 	return x, nil
 }
 
+// Open opens either a local serial device or an RFC2217 endpoint.
 func Open(port string, baud int, log *slog.Logger, debug bool) (serial.Port, error) {
 	if strings.HasPrefix(strings.ToLower(port), "rfc2217://") {
 		return rfc2217.Open(port, baud, log, debug)
@@ -792,6 +905,7 @@ func Open(port string, baud int, log *slog.Logger, debug bool) (serial.Port, err
 	return p, nil
 }
 
+// ReadArchiveRecord performs the complete setup and read sequence for one record.
 func (c *Client) ReadArchiveRecord(typ int, when time.Time, es []model.Element) (map[string]model.Value, error) {
 	if e := c.SetType(byte(typ)); e != nil {
 		return nil, e
@@ -801,6 +915,8 @@ func (c *Client) ReadArchiveRecord(typ int, when time.Time, es []model.Element) 
 	}
 	return c.ReadArchiveData(typ, when, es)
 }
+
+// ReadCurrent reads one current/total-current record using the supplied list.
 func (c *Client) ReadCurrent(typ int, es []model.Element) (map[string]model.Value, error) {
 	if e := c.SetType(byte(typ)); e != nil {
 		return nil, e
@@ -814,6 +930,8 @@ func (c *Client) ReadCurrent(typ int, es []model.Element) (map[string]model.Valu
 	}
 	return ParseElements(es, d, typ)
 }
+
+// DebugRecord returns a compact JSON representation of a decoded record.
 func (c *Client) DebugRecord(v map[string]model.Value) string {
 	b, _ := json.Marshal(v)
 	return strings.TrimSpace(string(b))
