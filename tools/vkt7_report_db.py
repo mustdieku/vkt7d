@@ -43,7 +43,7 @@ from reportlab.lib.enums import TA_CENTER
 from reportlab.lib.pagesizes import A4, landscape
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
-from reportlab.platypus import PageBreak, Paragraph, SimpleDocTemplate, Table, TableStyle, KeepTogether
+from reportlab.platypus import PageBreak, Paragraph, BaseDocTemplate, Table, TableStyle, KeepTogether, Frame, NextPageTemplate, PageTemplate
 
 
 LOG = logging.getLogger("vkt7_report_db")
@@ -792,16 +792,52 @@ def create_pdf(
     v_unit = unit_for(properties, "V", "м³")
     bnp_unit = unit_for(properties, "BNP", "ч")
 
-    doc = SimpleDocTemplate(
+    # Page 1 is landscape A4, page 2 is portrait A4.
+    #
+    # SimpleDocTemplate supports only one page size for the whole document,
+    # therefore BaseDocTemplate with two PageTemplate objects is used.
+    landscape_width, landscape_height = landscape(A4)
+    portrait_width, portrait_height = A4
+
+    left_margin = 8 * mm
+    right_margin = 8 * mm
+    top_margin = 8 * mm
+    bottom_margin = 8 * mm
+
+    landscape_frame = Frame(
+        left_margin,
+        bottom_margin,
+        landscape_width - left_margin - right_margin,
+        landscape_height - top_margin - bottom_margin,
+        id="landscape_frame",
+    )
+    portrait_frame = Frame(
+        left_margin,
+        bottom_margin,
+        portrait_width - left_margin - right_margin,
+        portrait_height - top_margin - bottom_margin,
+        id="portrait_frame",
+    )
+
+    doc = BaseDocTemplate(
         str(output),
         pagesize=landscape(A4),
-        rightMargin=8 * mm,
-        leftMargin=8 * mm,
-        topMargin=8 * mm,
-        bottomMargin=8 * mm,
         title="Архив ВКТ-7",
         author="vkt7_report_db.py",
     )
+
+    doc.addPageTemplates([
+        PageTemplate(
+            id="landscape",
+            frames=[landscape_frame],
+            pagesize=landscape(A4),
+        ),
+        PageTemplate(
+            id="portrait",
+            frames=[portrait_frame],
+            pagesize=A4,
+        ),
+    ])
 
     # One archive row per date.
     rows_by_date: Dict[date, Dict[str, Any]] = {}
@@ -1051,6 +1087,7 @@ def create_pdf(
     )
 
     # ------------------------------------------------------------------ page 2
+    elements.append(NextPageTemplate("portrait"))
     elements.append(PageBreak())
     elements.append(Paragraph("Название организации и номер договора", title_style))
 
@@ -1093,6 +1130,7 @@ def create_pdf(
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
         ("ALIGN", (0, 0), (-1, -1), "CENTER"),
         ("BACKGROUND", (0, 0), (-1, 1), colors.lightgrey),
+        ("BACKGROUND", (0, -1), (-1, -1), colors.lightgrey),
         ("FONTNAME", (0, 0), (-1, -1), font_name),
         ("SPAN", (0, 0), (3, 0)),
         ("LINEABOVE", (0, cold_total_row_index), (-1, cold_total_row_index), 1.0, colors.black),

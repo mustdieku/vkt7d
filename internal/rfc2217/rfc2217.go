@@ -352,8 +352,8 @@ func (p *Port) removeAck(cmd byte) {
 
 func (p *Port) reader() {
 	buf := make([]byte, 4096)
-	state := byte(0)
-	var sub []byte
+	var decoder telnetDecoder
+
 	for {
 		n, err := p.conn.Read(buf)
 		if n > 0 {
@@ -362,6 +362,7 @@ func (p *Port) reader() {
 				"len", n,
 			)
 		}
+
 		if err != nil {
 			select {
 			case p.errCh <- err:
@@ -369,48 +370,13 @@ func (p *Port) reader() {
 			}
 			return
 		}
-		for _, b := range buf[:n] {
-			switch state {
-			case 0: // ordinary data
-				if b == IAC {
-					state = 1
-				} else {
-					p.pushData([]byte{b})
-				}
-			case 1: // after IAC
-				switch b {
-				case IAC:
-					p.pushData([]byte{IAC})
-					state = 0
-				case WILL, WONT, DO, DONT:
-					state = b
-				case SB:
-					sub = sub[:0]
-					state = 3
-				default:
-					state = 0
-				}
-			case WILL, WONT, DO, DONT:
-				p.handleNegotiation(state, b)
-				state = 0
-			case 3: // subnegotiation
-				if b == IAC {
-					state = 4
-				} else {
-					sub = append(sub, b)
-				}
-			case 4: // IAC inside subnegotiation
-				if b == IAC {
-					sub = append(sub, IAC)
-					state = 3
-				} else if b == SE {
-					p.handleSubneg(sub)
-					state = 0
-				} else {
-					state = 0
-				}
-			}
-		}
+
+		decoder.feed(
+			buf[:n],
+			p.pushData,
+			p.handleNegotiation,
+			p.handleSubneg,
+		)
 	}
 }
 

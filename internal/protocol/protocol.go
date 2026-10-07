@@ -47,6 +47,18 @@ type Client struct {
 	Debug   bool
 }
 
+// CRCError reports a complete VKT-7 response whose CRC does not match.
+//
+// CRC validation is part of the VKT-7 protocol layer. A typed error keeps
+// retry decisions independent from human-readable error strings.
+type CRCError struct {
+	Frame []byte
+}
+
+func (e *CRCError) Error() string {
+	return fmt.Sprintf("CRC error in VKT-7 response: %X", e.Frame)
+}
+
 func CRC16(b []byte) uint16 {
 	crc := uint16(0xffff)
 	for _, x := range b {
@@ -125,8 +137,8 @@ func (c *Client) tx(req []byte) ([]byte, error) {
 		// bytes do not match its CRC. Do not accept or repair such a frame.
 		// One retry is safe for the read-only/request-response protocol and
 		// handles transient corruption or stale bytes on RFC2217 links.
-		if !strings.HasPrefix(err.Error(), "CRC error in VKT-7 response:") ||
-			attempt == maxAttempts {
+		var crcErr *CRCError
+		if !errors.As(err, &crcErr) || attempt == maxAttempts {
 			return nil, err
 		}
 
@@ -225,7 +237,9 @@ func (c *Client) readResponse(req []byte) ([]byte, error) {
 			if c.Debug && c.Log != nil {
 				c.Log.Debug("vkt7 RX CRC ERROR", "frame", fmt.Sprintf("%X", out), "len", len(out))
 			}
-			return nil, fmt.Errorf("CRC error in VKT-7 response: %X", out)
+			return nil, &CRCError{
+				Frame: append([]byte(nil), out...),
+			}
 		}
 	}
 	if c.Debug && c.Log != nil {
