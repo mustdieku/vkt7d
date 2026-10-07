@@ -2,8 +2,10 @@
 # -*- coding: utf-8 -*-
 """Generate a PDF report from VKT-7 daily archives in PostgreSQL.
 
-Only the daily archive is used:
+Daily archive is used for daily increments. Total archive is used as
+an absolute cumulative anchor:
     vkt7.daily_archive
+    vkt7.total_archive
 
 Element availability is taken from:
     vkt7.active_elements
@@ -310,6 +312,72 @@ def get_daily_rows(
         return [dict(row) for row in cur.fetchall()]
 
 
+def get_total_rows(
+    conn,
+    device_id: int,
+    first_day: date,
+    last_day: date,
+) -> List[Dict[str, Any]]:
+    """Read total-archive records around the requested period.
+
+    The total archive contains absolute cumulative values. At least one
+    record before/inside/after the report period is required to reconstruct
+    cumulative values for daily rows.
+
+    Two records are fetched on each side so that the report remains usable
+    even when there are gaps in the total archive.
+    """
+    sql = """
+        (
+            SELECT
+                archive_date,
+                "values"
+            FROM vkt7.total_archive
+            WHERE device_id = %s
+              AND archive_date < %s
+            ORDER BY archive_date DESC
+            LIMIT 2
+        )
+        UNION ALL
+        (
+            SELECT
+                archive_date,
+                "values"
+            FROM vkt7.total_archive
+            WHERE device_id = %s
+              AND archive_date >= %s
+              AND archive_date <= %s
+            ORDER BY archive_date
+        )
+        UNION ALL
+        (
+            SELECT
+                archive_date,
+                "values"
+            FROM vkt7.total_archive
+            WHERE device_id = %s
+              AND archive_date > %s
+            ORDER BY archive_date
+            LIMIT 2
+        )
+        ORDER BY archive_date
+    """
+    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(
+            sql,
+            (
+                device_id,
+                first_day,
+                device_id,
+                first_day,
+                last_day,
+                device_id,
+                last_day,
+            ),
+        )
+        return [dict(row) for row in cur.fetchall()]
+
+
 # -----------------------------------------------------------------------------
 # Properties
 # -----------------------------------------------------------------------------
@@ -450,6 +518,146 @@ def value_from_record(
     return extract_element(row.get("values"), element_address, active_elements)
 
 
+def archive_date_value(
+    row: Dict[str, Any],
+    archive_name: str,
+) -> Optional[float]:
+    """Return a numeric value from an archive JSON object.
+
+    Total archive values are stored using the same semantic JSON keys as
+    daily archive values, therefore no protocol address conversion is
+    required here.
+    """
+    values = normalize_json(row.get("values"))
+    if not isinstance(values, dict):
+        return None
+    return to_number(values.get(archive_name))
+
+
+def parse_archive_date(value: Any) -> date:
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    return date.fromisoformat(str(value)[:10])
+
+
+def build_cumulative_values(
+    daily_rows: List[Dict[str, Any]],
+    total_rows: List[Dict[str, Any]],
+    archive_name: str,
+) -> Dict[date, Optional[float]]:
+    """Reconstruct absolute cumulative values for daily archive rows.
+
+    A total-archive value is an absolute meter reading. Daily archive
+    values are increments for a complete day.
+
+    If an anchor exists before the report period:
+
+        cumulative(day) =
+            total(anchor) +
+            sum(daily(anchor + 1 .. day))
+
+    If only an anchor after the period exists:
+
+        cumulative(day) =
+            total(anchor) -
+            sum(daily(day + 1 .. anchor))
+
+    The function uses the closest total-archive anchor to the report
+    period. It does not use monthly_archive because monthly archive values
+    are period increments, not absolute cumulative meter readings.
+
+    A counter reset/rollover is detected when the reconstructed direction
+    becomes inconsistent with the anchor. In that case the value is left
+    undefined instead of silently producing a false cumulative reading.
+    """
+    if not daily_rows or not total_rows:
+        return {}
+
+    daily: Dict[date, Optional[float]] = {}
+    for row in daily_rows:
+        daily[parse_archive_date(row["archive_date"])] = archive_date_value(
+            row,
+            archive_name,
+        )
+
+    totals: List[tuple[date, float]] = []
+    for row in total_rows:
+        d = parse_archive_date(row["archive_date"])
+        value = archive_date_value(row, archive_name)
+        if value is not None:
+            totals.append((d, value))
+
+    if not totals:
+        return {}
+
+    totals.sort()
+    report_dates = sorted(daily)
+    first_day = report_dates[0]
+    last_day = report_dates[-1]
+
+    # Prefer an anchor before the period. This is the normal VKT-7 case:
+    # total archive records are periodically created on the meter's
+    # configured report day.
+    before = [item for item in totals if item[0] <= first_day]
+    after = [item for item in totals if item[0] >= last_day]
+
+    if before:
+        anchor_date, anchor_value = before[-1]
+        direction = 1
+    elif after:
+        anchor_date, anchor_value = after[0]
+        direction = -1
+    else:
+        return {}
+
+    result: Dict[date, Optional[float]] = {}
+
+    if direction == 1:
+        running = anchor_value
+
+        for d in report_dates:
+            if d <= anchor_date:
+                if d == anchor_date:
+                    result[d] = running
+                continue
+
+            increment = daily.get(d)
+            if increment is None:
+                result[d] = None
+                continue
+
+            running += increment
+            result[d] = running
+
+    else:
+        running = anchor_value
+
+        # Work backwards from the first known day after the anchor.
+        for d in reversed(report_dates):
+            if d >= anchor_date:
+                if d == anchor_date:
+                    result[d] = running
+                continue
+
+            increment = daily.get(d + timedelta(days=1))
+            if increment is None:
+                result[d] = None
+                continue
+
+            running -= increment
+            result[d] = running
+
+    LOG.info(
+        "Cumulative %s reconstructed from total_archive anchor %s = %s",
+        archive_name,
+        anchor_date,
+        anchor_value,
+    )
+    return result
+
+
 # -----------------------------------------------------------------------------
 # PDF
 # -----------------------------------------------------------------------------
@@ -482,7 +690,7 @@ def find_font() -> str:
 
 def create_pdf(
     rows: List[Dict[str, Any]],
-    device: Dict[str, Any],
+    total_rows: List[Dict[str, Any]],    device: Dict[str, Any],
     active_elements: set[int],
     properties: Dict[str, PropertyInfo],
     first_day: date,
@@ -560,6 +768,15 @@ def create_pdf(
             d = date.fromisoformat(d[:10])
         rows_by_date[d] = row
     all_dates = sorted(rows_by_date)
+
+    # V3_2 is the cold-water volume shown on page 2.
+    # Its daily archive value is an increment, while total_archive.V3_2
+    # is an absolute cumulative value.
+    cumulative_v3 = build_cumulative_values(
+        rows,
+        total_rows,
+        "V3_2",
+    )
 
     elements = [Paragraph("Название организации и номер договора", title_style)]
 
@@ -678,10 +895,11 @@ def create_pdf(
     elements.append(Paragraph("Название организации и номер договора", title_style))
 
     cold_table_data = [
-        [paragraph(f"<b>Отчет о суточных параметрах потребления воды за период: {first_day.strftime('%d.%m.%Y')} — {last_day.strftime('%d.%m.%Y')}</b>", header_style)] + [""] * 2,
+        [paragraph(f"<b>Отчет о суточных параметрах потребления воды за период: {first_day.strftime('%d.%m.%Y')} — {last_day.strftime('%d.%m.%Y')}</b>", header_style)] + [""] * 3,
         [
             paragraph("Дата", header_style),
             paragraph(f"Vхвс, {v_unit}", header_style),
+            paragraph(f"Накоплено Vхвс, {v_unit}", header_style),
             paragraph(f"Период нормальной работы, {bnp_unit}", header_style),
         ]
     ]
@@ -691,29 +909,32 @@ def create_pdf(
         row = rows_by_date[current_date]
         v3 = value_from_record(row, REPORT_ELEMENTS["TV2"]["V3"], active_elements)
         bnp = value_from_record(row, REPORT_ELEMENTS["TV2"]["BNP"], active_elements)
-        cold_rows.append([v3, bnp])
+        cumulative = cumulative_v3.get(current_date)
+        cold_rows.append([v3, cumulative, bnp])
         cold_table_data.append([
             paragraph(current_date.strftime("%d.%m.%Y"), cell_style),
             paragraph(format_number(v3, tv2_v3_dec), cell_style),
+            paragraph(format_number(cumulative, tv2_v3_dec), cell_style),
             paragraph(format_number(bnp, tv2_bnp_dec), cell_style),
         ])
 
     cold_total_row = [
         paragraph("<b>Итого</b>", total_style),
         paragraph(f"<b>{format_number(sum_values(r[0] for r in cold_rows), tv2_v3_dec)}</b>", total_style),
-        paragraph(f"<b>{format_number(sum_values(r[1] for r in cold_rows), tv2_bnp_dec)}</b>", total_style),
+        "",
+        paragraph(f"<b>{format_number(sum_values(r[2] for r in cold_rows), tv2_bnp_dec)}</b>", total_style),
     ]
     cold_table_data.append(cold_total_row)
     cold_total_row_index = len(cold_table_data) - 1
 
-    cold_table = Table(cold_table_data, colWidths=[45 * mm, 45 * mm, 45 * mm], repeatRows=1, hAlign="CENTER")
+    cold_table = Table(cold_table_data, colWidths=[35 * mm, 35 * mm, 45 * mm, 35 * mm], repeatRows=1, hAlign="CENTER")
     cold_table.setStyle(TableStyle([
         ("GRID", (0, 0), (-1, -1), 0.5, colors.black),
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
         ("ALIGN", (0, 0), (-1, -1), "CENTER"),
         ("BACKGROUND", (0, 0), (-1, 1), colors.lightgrey),
         ("FONTNAME", (0, 0), (-1, -1), font_name),
-        ("SPAN", (0, 0), (2, 0)),
+        ("SPAN", (0, 0), (3, 0)),
         ("LINEABOVE", (0, cold_total_row_index), (-1, cold_total_row_index), 1.0, colors.black),
         ("TOPPADDING", (0, 0), (-1, 0), 5),
         ("BOTTOMPADDING", (0, 0), (-1, 0), 5),
@@ -739,7 +960,9 @@ def create_pdf(
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Генерация PDF-отчета ВКТ-7 из суточного архива PostgreSQL."
+        description=(
+            "Генерация PDF-отчета ВКТ-7 из суточного и итогового архивов PostgreSQL."
+        )
     )
     parser.add_argument(
         "--db-url",
@@ -785,6 +1008,7 @@ def main() -> int:
         active_elements = get_active_elements(conn, args.device_id)
         properties = get_properties(conn, args.device_id)
         rows = get_daily_rows(conn, args.device_id, args.first_day, args.last_day)
+        total_rows = get_total_rows(conn, args.device_id, args.first_day, args.last_day)
 
         LOG.info(
             "Устройство: id=%s name=%s address=%s",
@@ -793,6 +1017,7 @@ def main() -> int:
         LOG.info("Активных элементов: %d", len(active_elements))
         LOG.info("Свойств: %d", len(properties))
         LOG.info("Найдено суточных записей: %d", len(rows))
+        LOG.info("Найдено итоговых записей: %d", len(total_rows))
 
         if not rows:
             LOG.warning("За указанный период суточных записей нет.")
@@ -805,6 +1030,7 @@ def main() -> int:
             properties=properties,
             first_day=args.first_day,
             last_day=args.last_day,
+            total_rows=total_rows,
             output=output,
         )
         LOG.info("PDF создан: %s", output)
