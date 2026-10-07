@@ -734,7 +734,8 @@ def find_font() -> str:
 
 def create_pdf(
     rows: List[Dict[str, Any]],
-    total_rows: List[Dict[str, Any]],    device: Dict[str, Any],
+    total_rows: List[Dict[str, Any]],
+    device: Dict[str, Any],
     active_elements: set[int],
     properties: Dict[str, PropertyInfo],
     first_day: date,
@@ -820,6 +821,30 @@ def create_pdf(
         rows,
         total_rows,
         "V3_2",
+    )
+
+    # Absolute cumulative values used in the summary block on page 1.
+    #
+    # Qo_1  - accumulated heating energy
+    # Qo_2  - accumulated DHW energy
+    # V1_2  - accumulated DHW volume
+    #
+    # These values are reconstructed from total_archive using daily
+    # archive increments between the absolute anchor and report dates.
+    cumulative_qo_tv1 = build_cumulative_values(
+        rows,
+        total_rows,
+        "Qo_1",
+    )
+    cumulative_qo_tv2 = build_cumulative_values(
+        rows,
+        total_rows,
+        "Qo_2",
+    )
+    cumulative_v1_tv2 = build_cumulative_values(
+        rows,
+        total_rows,
+        "V1_2",
     )
 
     elements = [Paragraph("Название организации и номер договора", title_style)]
@@ -933,6 +958,92 @@ def create_pdf(
         ("BOTTOMPADDING", (0, 0), (-1, 2), 4),
     ]))
     elements.append(table)
+
+    # ------------------------------------------------------------------
+    # Cumulative data for the report period.
+    #
+    # This is intentionally a separate four-column table. The main
+    # parameter table has 13 columns and should not be structurally
+    # modified by the cumulative summary.
+    cumulative_table_data = [
+        [
+            paragraph("<b>Накопленные данные за период</b>", header_style),
+            "",
+            "",
+            "",
+        ],
+        [
+            paragraph("Дата", header_style),
+            paragraph(f"Qотопления, {qo_unit}", header_style),
+            paragraph(f"Qгвс, {qo_unit}", header_style),
+            paragraph(f"Vгвс, {v_unit}", header_style),
+        ],
+        [
+            paragraph(first_day.strftime("%d.%m.%Y"), cell_style),
+            paragraph(
+                format_number(
+                    cumulative_qo_tv1.get(first_day),
+                    tv1_qo_dec,
+                ),
+                cell_style,
+            ),
+            paragraph(
+                format_number(
+                    cumulative_qo_tv2.get(first_day),
+                    tv2_qo_dec,
+                ),
+                cell_style,
+            ),
+            paragraph(
+                format_number(
+                    cumulative_v1_tv2.get(first_day),
+                    tv2_v1_dec,
+                ),
+                cell_style,
+            ),
+        ],
+        [
+            paragraph(last_day.strftime("%d.%m.%Y"), cell_style),
+            paragraph(
+                format_number(
+                    cumulative_qo_tv1.get(last_day),
+                    tv1_qo_dec,
+                ),
+                cell_style,
+            ),
+            paragraph(
+                format_number(
+                    cumulative_qo_tv2.get(last_day),
+                    tv2_qo_dec,
+                ),
+                cell_style,
+            ),
+            paragraph(
+                format_number(
+                    cumulative_v1_tv2.get(last_day),
+                    tv2_v1_dec,
+                ),
+                cell_style,
+            ),
+        ],
+    ]
+
+    cumulative_table = Table(
+        cumulative_table_data,
+        colWidths=[35 * mm, 45 * mm, 45 * mm, 45 * mm],
+        hAlign="CENTER",
+    )
+    cumulative_table.setStyle(TableStyle([
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.black),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+        ("BACKGROUND", (0, 0), (-1, -1), colors.lightgrey),
+        ("FONTNAME", (0, 0), (-1, -1), font_name),
+        ("SPAN", (0, 0), (3, 0)),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+    ]))
+    elements.append(cumulative_table)
 
     # ------------------------------------------------------------------ page 2
     elements.append(PageBreak())
