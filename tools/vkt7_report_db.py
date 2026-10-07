@@ -564,13 +564,12 @@ def build_cumulative_values(
             total(anchor) -
             sum(daily(day + 1 .. anchor))
 
-    The function uses the closest total-archive anchor to the report
-    period. It does not use monthly_archive because monthly archive values
-    are period increments, not absolute cumulative meter readings.
+    If the anchor is inside the report period, values are reconstructed
+    in both directions from that anchor.
 
-    A counter reset/rollover is detected when the reconstructed direction
-    becomes inconsistent with the anchor. In that case the value is left
-    undefined instead of silently producing a false cumulative reading.
+    total_archive is used as the absolute reference. monthly_archive is
+    deliberately not used because its values describe a period rather
+    than an absolute cumulative meter reading.
     """
     if not daily_rows or not total_rows:
         return {}
@@ -597,30 +596,51 @@ def build_cumulative_values(
     first_day = report_dates[0]
     last_day = report_dates[-1]
 
-    # Prefer an anchor before the period. This is the normal VKT-7 case:
-    # total archive records are periodically created on the meter's
-    # configured report day.
-    before = [item for item in totals if item[0] <= first_day]
-    after = [item for item in totals if item[0] >= last_day]
+    # Select the anchor closest to the report period.
+    #
+    # Important: total_archive may contain a record INSIDE the requested
+    # period (for example 2026-09-30 for a report 2026-09-19..2026-10-19).
+    # Such a record must be used as the reference point.
+    inside = [item for item in totals if first_day <= item[0] <= last_day]
 
-    if before:
-        anchor_date, anchor_value = before[-1]
-        direction = 1
-    elif after:
-        anchor_date, anchor_value = after[0]
-        direction = -1
+    if inside:
+        # Prefer the latest anchor inside the period.  This minimizes the
+        # amount of backward reconstruction and is useful when daily
+        # archive has gaps near the beginning of the report.
+        anchor_date, anchor_value = inside[-1]
     else:
-        return {}
+        before = [item for item in totals if item[0] < first_day]
+        after = [item for item in totals if item[0] > last_day]
+
+        if before:
+            # Normal case: reconstruct forward from the latest absolute
+            # total before the report.
+            anchor_date, anchor_value = before[-1]
+        elif after:
+            # Fallback: reconstruct backwards from the earliest absolute
+            # total after the report.
+            anchor_date, anchor_value = after[0]
+        else:
+            LOG.warning(
+                "No usable total_archive anchor for %s in period %s..%s",
+                archive_name,
+                first_day,
+                last_day,
+            )
+            return {}
 
     result: Dict[date, Optional[float]] = {}
 
-    if direction == 1:
-        running = anchor_value
+    # The anchor itself is an absolute cumulative value.
+    if first_day <= anchor_date <= last_day:
+        result[anchor_date] = anchor_value
 
+        # Reconstruct forward from the anchor:
+        #
+        # C(day) = C(anchor) + daily(anchor+1 .. day)
+        running = anchor_value
         for d in report_dates:
             if d <= anchor_date:
-                if d == anchor_date:
-                    result[d] = running
                 continue
 
             increment = daily.get(d)
@@ -631,16 +651,40 @@ def build_cumulative_values(
             running += increment
             result[d] = running
 
-    else:
+        # Reconstruct backwards from the anchor:
+        #
+        # C(day) = C(anchor) - daily(day+1 .. anchor)
         running = anchor_value
-
-        # Work backwards from the first known day after the anchor.
         for d in reversed(report_dates):
             if d >= anchor_date:
-                if d == anchor_date:
-                    result[d] = running
                 continue
 
+            increment = daily.get(d + timedelta(days=1))
+            if increment is None:
+                result[d] = None
+                continue
+
+            running -= increment
+            result[d] = running
+
+    elif anchor_date < first_day:
+        # Anchor before the report: reconstruct forward.
+        running = anchor_value
+
+        for d in report_dates:
+            increment = daily.get(d)
+            if increment is None:
+                result[d] = None
+                continue
+
+            running += increment
+            result[d] = running
+
+    else:
+        # Anchor after the report: reconstruct backwards.
+        running = anchor_value
+
+        for d in reversed(report_dates):
             increment = daily.get(d + timedelta(days=1))
             if increment is None:
                 result[d] = None
