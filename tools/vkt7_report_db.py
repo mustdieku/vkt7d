@@ -747,23 +747,19 @@ def create_pdf(
 
     title_style = ParagraphStyle(
         "VKTTitle", parent=styles["Title"], fontName=font_name,
-        fontSize=14, leading=16, alignment=TA_CENTER, spaceAfter=5 * mm,
+        fontSize=12, leading=12, alignment=TA_CENTER, spaceAfter=5 * mm,
     )
     header_style = ParagraphStyle(
         "VKTHeader", parent=styles["Normal"], fontName=font_name,
-        fontSize=7, leading=8, alignment=TA_CENTER,
+        fontSize=6, leading=6, alignment=TA_CENTER,
     )
     cell_style = ParagraphStyle(
         "VKTCell", parent=styles["Normal"], fontName=font_name,
-        fontSize=7, leading=8, alignment=TA_CENTER,
+        fontSize=6, leading=6, alignment=TA_CENTER,
     )
     total_style = ParagraphStyle(
         "VKTTotal", parent=cell_style, fontName=font_name,
-        fontSize=7, leading=8, alignment=TA_CENTER,
-    )
-    info_style = ParagraphStyle(
-        "VKTInfo", parent=styles["Normal"], fontName=font_name,
-        fontSize=6, leading=7, alignment=TA_CENTER, spaceBefore=4 * mm,
+        fontSize=6, leading=6, alignment=TA_CENTER,
     )
 
     # Precision and units are taken from properties.
@@ -988,6 +984,9 @@ def create_pdf(
         ("SPAN", (9, 1), (11, 1)),
         ("SPAN", (0, 1), (0, 2)),
         ("SPAN", (12, 1), (12, 2)),
+        ("SPAN", (4, -2), (8, -2)),
+        ("SPAN", (1, -1), (3, -1)),
+        ("SPAN", (9, -1), (10, -1)),
         ("LINEABOVE", (0, total_row_index), (-1, total_row_index), 1.0, colors.black),
         ("LINEABOVE", (0, average_row_index), (-1, average_row_index), 1.0, colors.black),
         ("TOPPADDING", (0, 0), (-1, 2), 4),
@@ -1140,14 +1139,6 @@ def create_pdf(
         ("BOTTOMPADDING", (0, cold_total_row_index), (-1, cold_total_row_index), 5),
      ]))
     elements.append(cold_table)
-
-    device_info = (
-        f"Устройство: {device.get('name', '')}; "
-        f"адрес: {device.get('address', '')}; "
-        f"device_id: {device.get('id', '')}; "
-        f"период: {first_day.strftime('%d.%m.%Y')} — {last_day.strftime('%d.%m.%Y')}"
-    )
-    elements.append(Paragraph(device_info, info_style))
 
     doc.build(elements)
 
