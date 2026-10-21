@@ -34,6 +34,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from xml.sax.saxutils import escape as xml_escape
 from typing import Any, Dict, Iterable, List, Optional
 
 import psycopg2
@@ -741,6 +742,8 @@ def create_pdf(
     first_day: date,
     last_day: date,
     output: Path,
+    heading_heat_text: str = "Название организации и номер договора",
+    heading_cold_text: str = "Название организации и номер договора",
 ) -> None:
     font_name = find_font()
     styles = getSampleStyleSheet()
@@ -879,7 +882,7 @@ def create_pdf(
         "V1_2",
     )
 
-    elements = [Paragraph("Название организации и номер договора", title_style)]
+    elements = [Paragraph(xml_escape(heading_heat_text), title_style)]
 
     # ------------------------------------------------------------------ page 1
     table_data = [
@@ -1088,7 +1091,7 @@ def create_pdf(
     # ------------------------------------------------------------------ page 2
     elements.append(NextPageTemplate("portrait"))
     elements.append(PageBreak())
-    elements.append(Paragraph("Название организации и номер договора", title_style))
+    elements.append(Paragraph(xml_escape(heading_cold_text), title_style))
 
     cold_table_data = [
         [paragraph(f"<b>Отчет о суточных параметрах потребления воды за период: {first_day.strftime('%d.%m.%Y')} — {last_day.strftime('%d.%m.%Y')}</b>", header_style)] + [""] * 3,
@@ -1168,6 +1171,16 @@ def build_parser() -> argparse.ArgumentParser:
         required=True, help="Дата окончания периода: YYYY-MM-DD. Включительно.",
     )
     parser.add_argument("--output", required=True, help="Путь к итоговому PDF.")
+    parser.add_argument(
+        "--heading-heat",
+        default="Название организации и номер договора",
+        help="Заглавный текст перед таблицей отчета отопления и ГВС.",
+    )
+    parser.add_argument(
+        "--heading-cold",
+        default="Название организации и номер договора",
+        help="Заглавный текст перед таблицей отчета ХВС.",
+    )
     parser.add_argument("--verbose", action="store_true", help="Включить подробный лог.")
     return parser
 
@@ -1221,6 +1234,8 @@ def main() -> int:
             last_day=args.last_day,
             total_rows=total_rows,
             output=output,
+            heading_heat_text=args.heading_heat,
+            heading_cold_text=args.heading_cold,
         )
         LOG.info("PDF создан: %s", output)
         return 0
