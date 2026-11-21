@@ -754,15 +754,15 @@ def create_pdf(
     )
     header_style = ParagraphStyle(
         "VKTHeader", parent=styles["Normal"], fontName=font_name,
-        fontSize=6, leading=6, alignment=TA_CENTER,
+        fontSize=6, leading=5, alignment=TA_CENTER,
     )
     cell_style = ParagraphStyle(
         "VKTCell", parent=styles["Normal"], fontName=font_name,
-        fontSize=6, leading=6, alignment=TA_CENTER,
+        fontSize=6, leading=5, alignment=TA_CENTER,
     )
     total_style = ParagraphStyle(
         "VKTTotal", parent=cell_style, fontName=font_name,
-        fontSize=6, leading=6, alignment=TA_CENTER,
+        fontSize=6, leading=5, alignment=TA_CENTER,
     )
 
     # Precision and units are taken from properties.
