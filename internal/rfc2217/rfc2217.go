@@ -328,26 +328,6 @@ func (p *Port) command(cmd byte, value []byte) error {
 		if len(got) == 0 || got[0] != expected {
 			return fmt.Errorf("RFC2217 unexpected acknowledgement for command 0x%02x: %x", cmd, got)
 		}
-
-		// RFC 2217 SET-CONTROL acknowledgements contain the server's
-		// resulting control value after the command byte. For RTS commands,
-		// checking only the acknowledgement command is insufficient: some
-		// servers acknowledge SET_CONTROL while returning RTS_OFF.
-		//
-		// VKT-7 requires RTS to remain asserted during communication, so
-		// fail explicitly if the server did not apply the requested state.
-		if cmd == SET_CONTROL && len(value) == 1 &&
-			(value[0] == SET_CONTROL_RTS_ON || value[0] == SET_CONTROL_RTS_OFF) {
-			if len(got) < 2 {
-				return fmt.Errorf("RFC2217 SET_CONTROL acknowledgement has no resulting value: %x", got)
-			}
-			if got[1] != value[0] {
-				return fmt.Errorf(
-					"RFC2217 SET_CONTROL did not apply RTS state: requested=0x%02x actual=0x%02x",
-					value[0], got[1],
-				)
-			}
-		}
 		return nil
 	case err := <-p.errCh:
 		p.removeAck(cmd)

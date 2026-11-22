@@ -327,32 +327,8 @@ func (c *Client) write(reg uint16, qty uint16, payload []byte) ([]byte, error) {
 }
 
 func (c *Client) Begin() error {
-	// The VKT-7 protocol describes "begin session" as a setup command whose
-	// response is not to be interpreted. Do not route it through write()/tx():
-	// tx() assumes every function 0x10 response is an ordinary 8-byte write
-	// acknowledgement and validates its length and CRC. That assumption is
-	// not valid for this special command.
-	//
-	// Clear stale input before sending. Any response to Begin is intentionally
-	// left unread; the next transaction's ResetInputBuffer() discards it
-	// before issuing a request whose response must be validated.
-	if err := c.Port.ResetInputBuffer(); err != nil {
-		return fmt.Errorf("reset serial input before begin session: %w", err)
-	}
-
-	req := frame(c.Address, functionWrite, RegReadList, 0, []byte{0xcc, 0x80, 0, 0, 0})
-	txFrame := append([]byte{requestPrefix, requestPrefix}, req...)
-	if c.Debug && c.Log != nil {
-		c.Log.Debug(
-			"vkt7 TX begin session",
-			"frame", fmt.Sprintf("%X", txFrame),
-			"len", len(txFrame),
-		)
-	}
-	if _, err := c.Port.Write(txFrame); err != nil {
-		return fmt.Errorf("send begin session: %w", err)
-	}
-	return nil
+	_, e := c.write(RegReadList, 0, []byte{0xcc, 0x80, 0, 0, 0})
+	return e
 }
 
 func (c *Client) ReadService() ([]byte, error) {
